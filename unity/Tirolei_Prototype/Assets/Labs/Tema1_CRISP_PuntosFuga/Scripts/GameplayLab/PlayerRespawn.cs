@@ -16,9 +16,16 @@ public class PlayerRespawn : MonoBehaviour
 
     [Header("Respawn automático en último suelo")]
     public bool useAutoGroundCheckpoint = true;
+
     [Tooltip("Offset vertical para evitar reaparecer clavado en el suelo")]
     public float groundRespawnYOffset = 0.1f;
-    [Range(0f, 1f)]
+
+    [Tooltip("Offset horizontal adicional (se suma al cálculo final)")]
+    public float groundRespawnXOffset = 0.8f;
+
+    [Tooltip("Margen mínimo desde el borde de la plataforma")]
+    public float platformEdgeMargin = 0.5f;
+
     public float minGroundNormalY = 0.7f;  // normal claramente hacia arriba
 
     private Rigidbody2D rb;
@@ -56,22 +63,40 @@ public class PlayerRespawn : MonoBehaviour
         if (!collision.collider.CompareTag(groundTag))
             return;
 
-        // Buscamos contactos que sean "suelo" (normales hacia arriba)
         foreach (var contact in collision.contacts)
         {
             if (contact.normal.y >= minGroundNormalY)
             {
-                Vector2 safe = contact.point;
-                safe.y += groundRespawnYOffset;
+                Collider2D groundCol = collision.collider;
+                Bounds b = groundCol.bounds;
+
+                Vector2 safe;
+
+                // 1) límites seguros dentro de la plataforma
+                float minX = b.min.x + platformEdgeMargin;
+                float maxX = b.max.x - platformEdgeMargin;
+
+                // 2) posición actual del jugador
+                float targetX = transform.position.x;
+
+                // 3) clamp para no reaparecer en el filo
+                targetX = Mathf.Clamp(targetX, minX, maxX);
+
+                // 4) offset global opcional
+                targetX += groundRespawnXOffset;
+
+                safe.x = targetX;
+                safe.y = b.max.y + groundRespawnYOffset;
 
                 currentRespawnPoint = safe;
 
-                // Opcional: comentar si te molesta el spam
-                // Debug.Log($"[PlayerRespawn] Checkpoint AUTO -> {currentRespawnPoint}");
+                // Debug opcional:
+                // Debug.Log($"[PlayerRespawn] AUTO -> {currentRespawnPoint} ({groundCol.name})");
+
                 break;
             }
         }
-    }
+    }   //  <<< ESTA LLAVE TE FALTABA
 
     /// <summary>
     /// Teletransporte al último punto seguro.
@@ -120,7 +145,6 @@ public class PlayerRespawn : MonoBehaviour
             );
         }
 
-        // Desactivar control del jugador
         var controller = GetComponent<PlayerSimpleController>();
         if (controller != null) controller.enabled = false;
 
@@ -140,7 +164,6 @@ public class PlayerRespawn : MonoBehaviour
 
         if (otherTag == hazardTag)
         {
-            // Evento de MUERTE
             if (GameplayTelemetry.Instance != null)
             {
                 GameplayTelemetry.Instance.LogEvent(
