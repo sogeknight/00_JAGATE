@@ -2,32 +2,34 @@ using UnityEngine;
 
 public class PlayerHealth : MonoBehaviour
 {
+    [Header("Vida del jugador")]
     public int maxHealth = 5;
-    public int currentHealth = 5;
 
-    public float invincibleTime = 0.5f;
-    private float invTimer = 0f;
+    [Tooltip("Vida actual (se rellena automáticamente al iniciar)")]
+    public int currentHealth;
 
-    private void Update()
+    private void Awake()
     {
-        if (invTimer > 0f)
-            invTimer -= Time.deltaTime;
+        // Garantiza la vida inicial SIEMPRE
+        currentHealth = maxHealth;
+        Debug.Log("[PlayerHealth] Awake → currentHealth = " + currentHealth);
     }
 
-    public void TakeDamage(int dmg)
+    public void TakeDamage(int amount)
     {
-        if (invTimer > 0f) return;
+        currentHealth -= amount;
+        currentHealth = Mathf.Clamp(currentHealth, 0, maxHealth);
 
-        currentHealth -= dmg;
-        invTimer = invincibleTime;
-
-        Debug.Log("[PlayerHealth] Daño recibido. Vida = " + currentHealth);
+        Debug.Log("[PlayerHealth] Daño → currentHealth = " + currentHealth);
 
         if (currentHealth <= 0)
         {
-            currentHealth = maxHealth;   // RESETEA VIDA
-            // NO LLAMES RESPAWN AQUÍ
-            // PlayerRespawn YA lo hace cuando pisas hazard o trigger
+            Die();
         }
+    }
+
+    private void Die()
+    {
+        Debug.Log("[PlayerHealth] Player muerto");
     }
 }
