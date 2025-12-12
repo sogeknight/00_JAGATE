@@ -14,23 +14,26 @@ public class ProceduralRoomGenerator : MonoBehaviour
     public int roomCount = 3;
     public int roomSpacing = 4;          // separación en unidades entre salas
 
+    [Header("Bordes básicos")]
+    public bool useFloor     = true;
+    public bool useCeiling   = true;
+    public bool useLeftWall  = true;
+    public bool useRightWall = true;
+
+    [Header("Ruido tipo 'cueva' (interior)")]
+    public bool useCaveNoise = true;
+    [Range(0, 100)]
+    public int randomFillPercent = 45;
+    [Range(0, 10)]
+    public int smoothIterations = 5;
 
     [Header("Aberturas laterales (por sala)")]
     [Range(0, 8)]
-    public int openingsPerSide = 1;      // nº de huecos en cada lado (izq y dcha)
+    public int openingsPerSide = 1;      // nº de huecos POR LADO (si el lado está activo)
     [Range(1, 10)]
     public int openingHeight = 3;        // altura del hueco en tiles
     [Range(1, 5)]
-    public int openingDepth = 2;         // cuántos tiles entra el pasillo hacia dentro
-
-
-    [Header("Ruido inicial")]
-    [Range(0, 100)]
-    public int randomFillPercent = 45;
-
-    [Header("Suavizado tipo 'cueva'")]
-    [Range(0, 10)]
-    public int smoothIterations = 5;
+    public int openingDepth = 2;         // cuánto entra hacia dentro el hueco (tiles despejados)
 
     [Header("Random")]
     public bool useRandomSeed = true;
@@ -51,7 +54,6 @@ public class ProceduralRoomGenerator : MonoBehaviour
     public int platformMinLength = 2;              // longitud mínima de la plataforma
     [Range(1, 10)]
     public int platformMaxLength = 5;              // longitud máxima de la plataforma
-
 
     private System.Random prng;
 
@@ -203,48 +205,75 @@ public class ProceduralRoomGenerator : MonoBehaviour
     {
         int[,] map = new int[width, height];
 
-        // Ruido inicial + bordes llenos
+        // --- 1) Todo vacío ---
         for (int x = 0; x < width; x++)
         {
             for (int y = 0; y < height; y++)
             {
-                if (x == 0 || x == width - 1 || y == 0 || y == height - 1)
-                {
-                    map[x, y] = 1;
-                }
-                else
-                {
-                    map[x, y] = (prng.Next(0, 100) < randomFillPercent) ? 1 : 0;
-                }
+                map[x, y] = 0;
             }
         }
 
-        // Suavizado
-        for (int i = 0; i < smoothIterations; i++)
+        // --- 2) Bordes básicos según flags ---
+        if (useFloor)
         {
-            map = SmoothMap(map, width, height);
+            for (int x = 0; x < width; x++)
+                map[x, 0] = 1;
         }
 
-        // Asegurar línea de suelo
-        for (int x = 0; x < width; x++)
+        if (useCeiling)
         {
-            map[x, 0] = 1;
+            for (int x = 0; x < width; x++)
+                map[x, height - 1] = 1;
         }
 
-        // Aberturas laterales por sala (independientes)
+        if (useLeftWall)
+        {
+            for (int y = 0; y < height; y++)
+                map[0, y] = 1;
+        }
+
+        if (useRightWall)
+        {
+            for (int y = 0; y < height; y++)
+                map[width - 1, y] = 1;
+        }
+
+        // --- 3) Ruido interior tipo "cueva" (opcional) ---
+        if (useCaveNoise && randomFillPercent > 0)
+        {
+            for (int x = 1; x < width - 1; x++)
+            {
+                for (int y = 1; y < height - 1; y++)
+                {
+                    if (map[x, y] == 1)
+                        continue;
+
+                    map[x, y] = (prng.Next(0, 100) < randomFillPercent) ? 1 : 0;
+                }
+            }
+
+            if (smoothIterations > 0)
+            {
+                for (int i = 0; i < smoothIterations; i++)
+                    map = SmoothMapWithLockedBorders(map, width, height);
+            }
+        }
+
+        // --- 4) Aberturas laterales (solo quitan tiles, no añaden grosor) ---
         CarveSideOpenings(map, width, height);
 
-        // PLATAFORMAS internas extra (opcional)
+        // --- 5) PLATAFORMAS internas extra (opcional) ---
         if (usePlatformNoise)
-        {
             AddPlatformNoise(map, width, height);
-        }
 
         return map;
     }
 
-
-    private int[,] SmoothMap(int[,] map, int width, int height)
+    /// <summary>
+    /// Suavizado tipo "cueva", pero sin tocar bordes exteriores.
+    /// </summary>
+    private int[,] SmoothMapWithLockedBorders(int[,] map, int width, int height)
     {
         int[,] newMap = new int[width, height];
 
@@ -252,7 +281,17 @@ public class ProceduralRoomGenerator : MonoBehaviour
         {
             for (int y = 0; y < height; y++)
             {
-                int neighbourWallTiles = GetSurroundingWallCount(map, width, height, x, y);
+                bool isBorder =
+                    (x == 0) || (x == width - 1) ||
+                    (y == 0) || (y == height - 1);
+
+                if (isBorder)
+                {
+                    newMap[x, y] = map[x, y];
+                    continue;
+                }
+
+                int neighbourWallTiles = GetSurroundingWallCountNoOutsideWalls(map, width, height, x, y);
 
                 if (neighbourWallTiles > 4)
                     newMap[x, y] = 1;
@@ -266,7 +305,7 @@ public class ProceduralRoomGenerator : MonoBehaviour
         return newMap;
     }
 
-    private int GetSurroundingWallCount(int[,] map, int width, int height, int gridX, int gridY)
+    private int GetSurroundingWallCountNoOutsideWalls(int[,] map, int width, int height, int gridX, int gridY)
     {
         int wallCount = 0;
 
@@ -277,14 +316,10 @@ public class ProceduralRoomGenerator : MonoBehaviour
                 if (neighbourX >= 0 && neighbourX < width &&
                     neighbourY >= 0 && neighbourY < height)
                 {
-                    if (neighbourX != gridX || neighbourY != gridY)
-                    {
-                        wallCount += map[neighbourX, neighbourY];
-                    }
-                }
-                else
-                {
-                    wallCount++; // fuera del mapa = muro
+                    if (neighbourX == gridX && neighbourY == gridY)
+                        continue;
+
+                    wallCount += map[neighbourX, neighbourY];
                 }
             }
         }
@@ -293,20 +328,20 @@ public class ProceduralRoomGenerator : MonoBehaviour
     }
 
     /// <summary>
-    /// openingsPerSide se interpreta como NÚMERO TOTAL de aberturas por sala.
-    /// - Si openingsPerSide = 1 => exactamente 1 hueco (en un solo lado, aleatorio).
-    /// - Si openingsPerSide = 2 => 2 huecos en total, alternando lados (izq/dcha).
-    /// - Altura = openingHeight, profundidad = openingDepth (acotadas al tamaño real).
+    /// Crea agujeros en las paredes laterales activas.
+    /// NO añade columnas sólidas hacia dentro (nada de bordes gordos).
     /// </summary>
     private void CarveSideOpenings(int[,] map, int width, int height)
     {
-        int totalOpenings = Mathf.Max(0, openingsPerSide);
-        if (totalOpenings == 0 || openingHeight <= 0 || openingDepth <= 0)
+        if (openingsPerSide <= 0 || openingHeight <= 0)
             return;
 
-        // Interior vertical: dejamos suelo (0) y techo (height-1) intactos
-        int interiorMinY   = 1;
-        int interiorMaxY   = height - 2; // inclusive
+        bool anySideActive = useLeftWall || useRightWall;
+        if (!anySideActive)
+            return;
+
+        int interiorMinY = 1;
+        int interiorMaxY = height - 2;
         int interiorHeight = interiorMaxY - interiorMinY + 1;
         if (interiorHeight <= 0)
             return;
@@ -314,37 +349,34 @@ public class ProceduralRoomGenerator : MonoBehaviour
         int effectiveHeight = Mathf.Clamp(openingHeight, 1, interiorHeight);
         int effectiveDepth  = Mathf.Clamp(openingDepth, 1, Mathf.Max(1, width / 4));
 
-        // Aseguramos que caben totalOpenings huecos con al menos 1 tile de separación
-        int gap = (interiorHeight - totalOpenings * effectiveHeight) / (totalOpenings + 1);
-        while (gap < 1 && effectiveHeight > 1)
-        {
-            effectiveHeight--;
-            gap = (interiorHeight - totalOpenings * effectiveHeight) / (totalOpenings + 1);
-        }
+        // LEFT
+        if (useLeftWall)
+            CarveOpeningsOnSide(map, width, height, interiorMinY, interiorMaxY,
+                                effectiveHeight, effectiveDepth,
+                                openingsPerSide, isLeft: true);
 
-        if (effectiveHeight <= 0)
-            return;
-        if (gap < 1) gap = 1;
+        // RIGHT
+        if (useRightWall)
+            CarveOpeningsOnSide(map, width, height, interiorMinY, interiorMaxY,
+                                effectiveHeight, effectiveDepth,
+                                openingsPerSide, isLeft: false);
+    }
 
-        // 1) Paredes laterales sólidas (con profundidad)
-        for (int y = interiorMinY; y <= interiorMaxY; y++)
-        {
-            for (int dx = 0; dx < effectiveDepth; dx++)
-            {
-                // lado izquierdo (0..effectiveDepth-1)
-                if (dx < width)
-                    map[dx, y] = 1;
+    private void CarveOpeningsOnSide(
+        int[,] map,
+        int width,
+        int height,
+        int interiorMinY,
+        int interiorMaxY,
+        int effectiveHeight,
+        int effectiveDepth,
+        int openingsCount,
+        bool isLeft)
+    {
+        float interiorHeight = interiorMaxY - interiorMinY + 1;
+        float segmentSize = interiorHeight / (openingsCount + 1);
 
-                // lado derecho (width-1 .. width-effectiveDepth)
-                int rx = width - 1 - dx;
-                if (rx >= 0)
-                    map[rx, y] = 1;
-            }
-        }
-
-        // 2) Calculamos posiciones verticales de los centros de cada hueco
-        float segmentSize = interiorHeight / (float)(totalOpenings + 1);
-        for (int i = 0; i < totalOpenings; i++)
+        for (int i = 0; i < openingsCount; i++)
         {
             float centerYFloat = interiorMinY + (i + 1) * segmentSize;
             int centerY = Mathf.RoundToInt(centerYFloat);
@@ -357,62 +389,38 @@ public class ProceduralRoomGenerator : MonoBehaviour
 
             int endY = startY + effectiveHeight - 1;
 
-            // 3) Elegimos en qué lado va este hueco
-            bool openOnLeft;
-            if (totalOpenings == 1)
-            {
-                // Uno solo: moneda al aire (o fijo a un lado si prefieres)
-                if (prng == null)
-                    openOnLeft = true;
-                else
-                    openOnLeft = prng.NextDouble() < 0.5;
-            }
-            else
-            {
-                // Varios: alternamos lados para repartirlos
-                openOnLeft = (i % 2 == 0); // 0,2,4.. izquierda; 1,3,5.. derecha
-            }
-
-            // 4) Tallamos el hueco SOLO en el lado elegido
             for (int y = startY; y <= endY; y++)
             {
                 if (y <= 0 || y >= height - 1)
                     continue;
 
-                if (openOnLeft)
+                // Quitamos tiles de pared, no añadimos grosor
+                if (isLeft)
                 {
-                    // izquierda: despejamos 0..effectiveDepth-1
                     for (int dx = 0; dx < effectiveDepth; dx++)
                     {
-                        if (dx < width)
-                            map[dx, y] = 0;
+                        int x = 0 + dx;
+                        if (x >= width) break;
+                        map[x, y] = 0;
                     }
                 }
                 else
                 {
-                    // derecha: despejamos width-1 .. width-effectiveDepth
                     for (int dx = 0; dx < effectiveDepth; dx++)
                     {
-                        int rx = width - 1 - dx;
-                        if (rx >= 0)
-                            map[rx, y] = 0;
+                        int x = width - 1 - dx;
+                        if (x < 0) break;
+                        map[x, y] = 0;
                     }
                 }
             }
         }
     }
 
-    /// <summary>
-    /// Añade "ruido" en forma de pequeñas plataformas flotantes.
-    /// No toca bordes, ni el suelo, ni el techo.
-    /// Controlado por platformNoisePercent y longitudes min/max.
-    /// </summary>
     private void AddPlatformNoise(int[,] map, int width, int height)
     {
-        // Zona vertical jugable para plataformas, lejos del suelo y del techo
-        int minY = 2;              // por encima de las filas 0 y 1
-        int maxY = height - 3;     // por debajo de height-1 y height-2
-
+        int minY = 2;
+        int maxY = height - 3;
         if (maxY <= minY)
             return;
 
@@ -420,45 +428,32 @@ public class ProceduralRoomGenerator : MonoBehaviour
         {
             for (int x = 1; x < width - 1; x++)
             {
-                // Solo intentamos crear plataforma donde ahora mismo es hueco
                 if (map[x, y] != 0)
                     continue;
 
-                // Probabilidad de empezar una plataforma aquí
                 if (prng.Next(0, 100) >= platformNoisePercent)
                     continue;
 
                 int length = prng.Next(platformMinLength, platformMaxLength + 1);
-                int dir = (prng.NextDouble() < 0.5) ? -1 : 1; // izquierda o derecha
+                int dir = (prng.NextDouble() < 0.5) ? -1 : 1;
 
                 int startX = x;
                 for (int i = 0; i < length; i++)
                 {
                     int px = startX + i * dir;
 
-                    // Nos salimos de los límites laterales: paramos
                     if (px <= 0 || px >= width - 1)
                         break;
 
-                    // Si hay muro ya, paramos la plataforma
                     if (map[px, y] != 0)
                         break;
 
-                    // Opcional: que parezca flotante (hueco arriba y abajo)
                     if (map[px, y - 1] == 0 && map[px, y + 1] == 0)
-                    {
                         map[px, y] = 1;
-                    }
                 }
             }
         }
     }
-
-
-
-
-
-
 
     private void DrawRoomToTilemap(int[,] map, Tilemap tilemap)
     {
@@ -472,9 +467,7 @@ public class ProceduralRoomGenerator : MonoBehaviour
             for (int y = 0; y < height; y++)
             {
                 if (map[x, y] == 1)
-                {
                     tilemap.SetTile(new Vector3Int(x, y, 0), groundTile);
-                }
             }
         }
     }
