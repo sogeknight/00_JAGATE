@@ -225,12 +225,23 @@ public class EnemySimple : MonoBehaviour
     {
         if (!other.CompareTag("Player")) return;
 
+        // 1) ¿Está el player en modo bounce invencible?
+        PlayerBounceAttack bounce = other.GetComponent<PlayerBounceAttack>();
+        if (bounce != null && bounce.invincibleDuringBounce && bounce.isInvincible)
+        {
+            Debug.Log("[EnemySimple] Player en BOUNCE ATTACK invencible → NO se aplica daño.");
+            return;
+        }
+
+        // 2) Si no está invencible, se aplica daño normal
         Debug.Log("[EnemySimple] Trigger con Player -> daño de contacto");
 
-        var playerHP = other.GetComponent<PlayerHealth>();
+        PlayerHealth playerHP = other.GetComponent<PlayerHealth>();
         if (playerHP != null)
         {
             playerHP.TakeDamage(contactDamage);
         }
     }
+
+
 }
