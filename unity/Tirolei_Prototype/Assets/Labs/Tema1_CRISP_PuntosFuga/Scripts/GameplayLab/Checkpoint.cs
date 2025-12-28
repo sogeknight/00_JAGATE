@@ -49,7 +49,8 @@ public class Checkpoint : MonoBehaviour
         }
 
         // 4) Guarda DESPUÉS de recargar
-        player.SaveCheckpointToPrefs(checkpointId);
+        player.SaveCheckpointToPrefs(checkpointId, transform.position);
+
 
         if (sfx) sfx.Play();
         if (activateVfx) activateVfx.SetActive(true);

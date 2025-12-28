@@ -2,11 +2,13 @@ using UnityEngine;
 
 [RequireComponent(typeof(Rigidbody2D))]
 [RequireComponent(typeof(Collider2D))]
-public class EnemySimple : MonoBehaviour, IBounceImpactReceiver
+public class EnemySimple : MonoBehaviour, IBounceImpactReceiver, IPiercingBounceReceiver
+
 {
     [Header("Vida")]
-    public int maxHealth = 3;
-    private int currentHealth;
+    [SerializeField] private int maxHealth = 80;   // editable en Inspector
+    [SerializeField] private int currentHealth;    // visible (debug) en Inspector, pero no tocable desde fuera
+
 
     [Header("Daño al jugador")]
     public int contactDamage = 1;
@@ -338,5 +340,20 @@ public class EnemySimple : MonoBehaviour, IBounceImpactReceiver
     {
         TakeHit(impact.damage);
     }
+
+    public bool ApplyPiercingBounce(BounceImpactData impact, float incomingDamage, out float remainingDamage)
+    {
+        // Aplica daño (usa el incomingDamage como “pool”)
+        int dmg = Mathf.Max(1, Mathf.CeilToInt(incomingDamage));
+        TakeHit(dmg);
+
+        // Decide cuánto “consume” este enemigo del pool.
+        // Si quieres que el daño pase íntegro a los siguientes, NO consumas:
+        remainingDamage = incomingDamage;
+
+        // IMPORTANTE: devolver true = "se rompe / se atraviesa" => NO rebote
+        return true;
+    }
+
 
 }

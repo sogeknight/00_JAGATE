@@ -1,221 +1,246 @@
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
+[RequireComponent(typeof(Collider2D))]
 public class PlayerRespawn : MonoBehaviour
 {
-    [Header("Checkpoint (por ahora solo se guarda; más adelante respawnea aquí)")]
+    [Header("Checkpoint")]
     public bool useCheckpoint = true;
-    public Transform currentCheckpoint; // si es null, se usa la posición inicial
+
+    [Tooltip("Opcional: si lo asignas, NEW usará este spawn en vez de la pos inicial del player.")]
+    public Transform startSpawnOverride;
+
+    [Tooltip("Checkpoint actual en runtime (el último tocado en esta sesión).")]
+    public Transform currentCheckpoint;
+
+    [Header("Run Mode (NEW vs CONTINUE) - solo afecta al SPAWN INICIAL")]
+    [Tooltip("Si está activo, al iniciar en NEW ignorará el save (pero NO lo borra).")]
+    public bool newGameIgnoresSavedCheckpointOnStart = true;
+
+    public KeyCode newGameKey = KeyCode.F1;     // fuerza NEW (spawn en inicio)
+    public KeyCode continueKey = KeyCode.C;     // fuerza CONTINUE (spawn en save si existe)
+
+    [Header("Death Respawn")]
+    [Tooltip("Si está activo, no recarga escena al morir; teleporta y listo.")]
+    public bool respawnWithoutReload = true;
+
+    [Tooltip("Si false, y NO hay checkpoint, recarga escena. Si true, teleporta a inicio igualmente.")]
+    public bool teleportToInitialIfNoCheckpoint = true;
+
+    [Header("Physics reset (Unity 6)")]
+    public bool resetVelocityOnTeleport = true;
+
+    // ===== PlayerPrefs keys =====
+    private const string PREF_RUNMODE = "RUN_MODE"; // 0 NEW, 1 CONTINUE
+    private const string PREF_HAS = "CP_HAS";
+    private const string PREF_X = "CP_X";
+    private const string PREF_Y = "CP_Y";
+    private const string PREF_ID = "CP_ID";
+
+    private Rigidbody2D rb;
     private Vector3 initialSpawnPos;
-
-    [Header("Game Over UI (OnGUI)")]
-    public bool enableGameOverUI = true;
-    public string gameOverTitle = "GAME OVER";
-    public string restartQuestion = "Restart?";
-    public string yesText = "YES";
-    public string noText = "NO";
-
-    [Header("Freeze")]
-    public bool freezeTimeOnGameOver = true;
-
-    [Header("Optional: disable player control on Game Over")]
-    public Behaviour[] disableTheseBehaviours;
-
-    [Header("Game Over Input")]
-    public KeyCode confirmKey = KeyCode.Z;
-    public bool acceptEnterSpaceToo = true;
-    public KeyCode upKey = KeyCode.UpArrow;
-    public KeyCode downKey = KeyCode.DownArrow;
-    public KeyCode upAltKey = KeyCode.W;
-    public KeyCode downAltKey = KeyCode.S;
-
-    [Tooltip("Nombre del eje vertical (Input Manager). Normalmente 'Vertical'.")]
-    public string verticalAxis = "Vertical";
-    [Tooltip("Umbral para considerar que el stick/cruceta se ha pulsado.")]
-    public float axisThreshold = 0.5f;
-    [Tooltip("Cooldown para que el stick no navegue 200 veces por segundo.")]
-    public float axisRepeatDelay = 0.18f;
-
-    private bool isGameOver;
-    private float prevTimeScale = 1f;
-
-    // 0 = YES, 1 = NO
-    private int selectedIndex = 0;
-    private float axisCooldown = 0f;
 
     private void Awake()
     {
-        isGameOver = false;
-        initialSpawnPos = transform.position;
+        rb = GetComponent<Rigidbody2D>();
+
+        // Posición inicial = donde esté el player en la escena (o override)
+        initialSpawnPos = (startSpawnOverride != null) ? startSpawnOverride.position : transform.position;
+    }
+
+    private void Start()
+    {
+        ApplySpawnForSceneEntry();
     }
 
     private void Update()
     {
-        if (!isGameOver) return;
-
-        if (axisCooldown > 0f)
-            axisCooldown -= Time.unscaledDeltaTime;
-
-        bool navUp = Input.GetKeyDown(upKey) || Input.GetKeyDown(upAltKey);
-        bool navDown = Input.GetKeyDown(downKey) || Input.GetKeyDown(downAltKey);
-
-        float v = 0f;
-        if (!string.IsNullOrEmpty(verticalAxis))
-            v = Input.GetAxisRaw(verticalAxis);
-
-        if (axisCooldown <= 0f)
+        // Teclas para decidir desde la propia TrainingArea (sin menú)
+        if (Input.GetKeyDown(newGameKey))
         {
-            if (v >= axisThreshold) { navUp = true; axisCooldown = axisRepeatDelay; }
-            else if (v <= -axisThreshold) { navDown = true; axisCooldown = axisRepeatDelay; }
+            SetRunMode(0);
+            ApplySpawnForSceneEntry();
         }
-
-        if (navUp) selectedIndex = 0;
-        else if (navDown) selectedIndex = 1;
-
-        bool confirm = Input.GetKeyDown(confirmKey);
-        if (acceptEnterSpaceToo)
-            confirm |= Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.Space);
-
-        if (confirm)
+        else if (Input.GetKeyDown(continueKey))
         {
-            if (selectedIndex == 0) RestartScene();
-            else QuitOrStopPlaymode();
+            SetRunMode(1);
+            ApplySpawnForSceneEntry();
         }
     }
 
-    // ===== API que tu proyecto ya espera (SectionTrigger.cs) =====
+    // =========================
+    // API para tus checkpoints
+    // =========================
     public void SetCheckpoint(Transform checkpoint)
     {
         if (!useCheckpoint) return;
+
         currentCheckpoint = checkpoint;
-        Debug.Log("[PlayerRespawn] SetCheckpoint -> " + (checkpoint ? checkpoint.name : "NULL"));
+        Vector3 p = checkpoint != null ? checkpoint.position : initialSpawnPos;
+
+        SaveCheckpointPrefs(checkpoint != null ? checkpoint.name : "NULL", p);
+
+        Debug.Log($"[PlayerRespawn] SetCheckpoint -> {(checkpoint ? checkpoint.name : "NULL")} @ {p}");
     }
 
     public void SetCheckpoint(Vector3 worldPos)
     {
         if (!useCheckpoint) return;
-        currentCheckpoint = null;
-        initialSpawnPos = worldPos;
-        Debug.Log("[PlayerRespawn] SetCheckpoint(Vector3) -> " + worldPos);
+
+        currentCheckpoint = null; // runtime no transform, pero guardamos posición
+        SaveCheckpointPrefs("POS", worldPos);
+
+        Debug.Log($"[PlayerRespawn] SetCheckpoint(Vector3) -> {worldPos}");
     }
 
-    public Vector3 GetCheckpointPosition()
+    // =========================
+    // Lo que tú quieres: MORIR => checkpoint si existe
+    // =========================
+    public void RespawnAfterDeath()
     {
-        if (!useCheckpoint) return initialSpawnPos;
-        if (currentCheckpoint != null) return currentCheckpoint.position;
+        Vector3 target = GetBestRespawnPoint();
+
+        // CLAVE: aunque hayas empezado NEW, si ya hay checkpoint, respawnea ahí.
+        bool hasAnyCheckpoint = HasRuntimeCheckpoint() || HasSavedCheckpoint();
+
+        if (respawnWithoutReload || hasAnyCheckpoint)
+        {
+            TeleportTo(target);
+            Debug.Log($"[PlayerRespawn] RespawnAfterDeath -> {target} (hasCP={hasAnyCheckpoint})");
+            return;
+        }
+
+        // Si no hay checkpoint y no quieres teleport directo:
+        if (teleportToInitialIfNoCheckpoint)
+        {
+            TeleportTo(initialSpawnPos);
+            Debug.Log($"[PlayerRespawn] RespawnAfterDeath -> INITIAL {initialSpawnPos} (no checkpoint)");
+            return;
+        }
+
+        // Último recurso: recargar escena
+        Debug.Log("[PlayerRespawn] RespawnAfterDeath -> Reload scene (no checkpoint)");
+        SceneManager.LoadScene(SceneManager.GetActiveScene().buildIndex);
+    }
+
+    // =========================
+    // Spawn al ENTRAR a la escena (NEW vs CONTINUE)
+    // =========================
+    private void ApplySpawnForSceneEntry()
+    {
+        int mode = GetRunMode(); // 0 NEW, 1 CONTINUE
+
+        if (mode == 1)
+        {
+            // CONTINUE: si hay save, úsalo; si no, inicio
+            Vector3 p = HasSavedCheckpoint() ? GetSavedCheckpointPosition() : initialSpawnPos;
+            TeleportTo(p);
+            Debug.Log($"[PlayerRespawn] Start spawn (CONTINUE) -> {p} (hasSave={HasSavedCheckpoint()})");
+        }
+        else
+        {
+            // NEW: inicio SIEMPRE (aunque exista save), pero NO se borra el save.
+            // Eso permite: empezar en Unity y, si coges checkpoint en esta run, morir => checkpoint.
+            if (newGameIgnoresSavedCheckpointOnStart)
+            {
+                TeleportTo(initialSpawnPos);
+                Debug.Log($"[PlayerRespawn] Start spawn (NEW) -> {initialSpawnPos} (save ignored on start)");
+            }
+            else
+            {
+                // Si quieres permitir que NEW también use save (normalmente no lo quieres)
+                Vector3 p = HasSavedCheckpoint() ? GetSavedCheckpointPosition() : initialSpawnPos;
+                TeleportTo(p);
+                Debug.Log($"[PlayerRespawn] Start spawn (NEW but allowed save) -> {p}");
+            }
+        }
+    }
+
+    // =========================
+    // Helpers
+    // =========================
+    private Vector3 GetBestRespawnPoint()
+    {
+        // Prioridad: checkpoint runtime > checkpoint guardado > inicio
+        if (HasRuntimeCheckpoint()) return currentCheckpoint.position;
+        if (HasSavedCheckpoint()) return GetSavedCheckpointPosition();
         return initialSpawnPos;
     }
 
+    private bool HasRuntimeCheckpoint()
+    {
+        return useCheckpoint && currentCheckpoint != null;
+    }
+
+    private bool HasSavedCheckpoint()
+    {
+        return useCheckpoint && PlayerPrefs.GetInt(PREF_HAS, 0) == 1;
+    }
+
+    private Vector3 GetSavedCheckpointPosition()
+    {
+        float x = PlayerPrefs.GetFloat(PREF_X, initialSpawnPos.x);
+        float y = PlayerPrefs.GetFloat(PREF_Y, initialSpawnPos.y);
+        return new Vector3(x, y, transform.position.z);
+    }
+
+    private void SaveCheckpointPrefs(string id, Vector3 p)
+    {
+        PlayerPrefs.SetInt(PREF_HAS, 1);
+        PlayerPrefs.SetFloat(PREF_X, p.x);
+        PlayerPrefs.SetFloat(PREF_Y, p.y);
+        PlayerPrefs.SetString(PREF_ID, id);
+        PlayerPrefs.Save();
+    }
+
+    public void ClearSavedCheckpoint()
+    {
+        PlayerPrefs.DeleteKey(PREF_HAS);
+        PlayerPrefs.DeleteKey(PREF_X);
+        PlayerPrefs.DeleteKey(PREF_Y);
+        PlayerPrefs.DeleteKey(PREF_ID);
+        PlayerPrefs.Save();
+
+        currentCheckpoint = null;
+
+        Debug.Log("[PlayerRespawn] ClearSavedCheckpoint()");
+    }
+
+    private int GetRunMode()
+    {
+        return PlayerPrefs.GetInt(PREF_RUNMODE, 0);
+    }
+
+    private void SetRunMode(int mode)
+    {
+        PlayerPrefs.SetInt(PREF_RUNMODE, mode);
+        PlayerPrefs.Save();
+        Debug.Log("[PlayerRespawn] SetRunMode -> " + mode);
+    }
+
+    private void TeleportTo(Vector3 worldPos)
+    {
+        if (rb != null)
+        {
+            // Unity 6: velocity obsoleto => linearVelocity
+            rb.position = worldPos;
+
+            if (resetVelocityOnTeleport)
+            {
+                rb.linearVelocity = Vector2.zero;
+                rb.angularVelocity = 0f;
+            }
+        }
+        else
+        {
+            transform.position = worldPos;
+        }
+    }
+
+    // Compatibilidad con código antiguo que llama TriggerGameOver()
     public void TriggerGameOver()
     {
-        if (isGameOver) return;
-
-        isGameOver = true;
-        selectedIndex = 0;
-        axisCooldown = 0f;
-
-        if (disableTheseBehaviours != null)
-        {
-            for (int i = 0; i < disableTheseBehaviours.Length; i++)
-                if (disableTheseBehaviours[i] != null)
-                    disableTheseBehaviours[i].enabled = false;
-        }
-
-        if (freezeTimeOnGameOver)
-        {
-            prevTimeScale = Time.timeScale;
-            Time.timeScale = 0f;
-        }
-
-        Debug.Log("[PlayerRespawn] GAME OVER");
+        RespawnAfterDeath();
     }
 
-    private void OnGUI()
-    {
-        if (!enableGameOverUI) return;
-        if (!isGameOver) return;
-
-        GUI.color = new Color(0f, 0f, 0f, 0.75f);
-        GUI.DrawTexture(new Rect(0, 0, Screen.width, Screen.height), Texture2D.whiteTexture);
-        GUI.color = Color.white;
-
-        float w = Mathf.Min(520f, Screen.width * 0.8f);
-        float h = 260f;
-        float x = (Screen.width - w) * 0.5f;
-        float y = (Screen.height - h) * 0.5f;
-
-        GUI.Box(new Rect(x, y, w, h), "");
-
-        var titleStyle = new GUIStyle(GUI.skin.label)
-        {
-            alignment = TextAnchor.MiddleCenter,
-            fontSize = 28,
-            fontStyle = FontStyle.Bold
-        };
-        GUI.Label(new Rect(x, y + 18, w, 40), gameOverTitle, titleStyle);
-
-        var questionStyle = new GUIStyle(GUI.skin.label)
-        {
-            alignment = TextAnchor.MiddleCenter,
-            fontSize = 18
-        };
-        GUI.Label(new Rect(x, y + 68, w, 30), restartQuestion, questionStyle);
-
-        float btnW = Mathf.Min(220f, w * 0.6f);
-        float btnH = 44f;
-        float bx = x + (w - btnW) * 0.5f;
-
-        float byYes = y + 120f;
-        float byNo = y + 174f;
-
-        var normalBtn = new GUIStyle(GUI.skin.button);
-        var selectedBtn = new GUIStyle(GUI.skin.button);
-        selectedBtn.fontStyle = FontStyle.Bold;
-        selectedBtn.fontSize = normalBtn.fontSize + 2;
-
-        string yesLabel = (selectedIndex == 0) ? ("> " + yesText) : yesText;
-        string noLabel = (selectedIndex == 1) ? ("> " + noText) : noText;
-
-        if (GUI.Button(new Rect(bx, byYes, btnW, btnH), yesLabel, selectedIndex == 0 ? selectedBtn : normalBtn))
-            RestartScene();
-
-        if (GUI.Button(new Rect(bx, byNo, btnW, btnH), noLabel, selectedIndex == 1 ? selectedBtn : normalBtn))
-            QuitOrStopPlaymode();
-
-        var hintStyle = new GUIStyle(GUI.skin.label)
-        {
-            alignment = TextAnchor.MiddleCenter,
-            fontSize = 12
-        };
-        GUI.Label(new Rect(x, y + h - 34, w, 20), $"↑/↓ or D-Pad, Confirm: {confirmKey}", hintStyle);
-    }
-
-    private void RestartScene()
-    {
-        if (freezeTimeOnGameOver) Time.timeScale = prevTimeScale;
-
-        if (disableTheseBehaviours != null)
-        {
-            for (int i = 0; i < disableTheseBehaviours.Length; i++)
-                if (disableTheseBehaviours[i] != null)
-                    disableTheseBehaviours[i].enabled = true;
-        }
-
-        int buildIndex = SceneManager.GetActiveScene().buildIndex;
-        Debug.Log("[PlayerRespawn] Restart -> " + buildIndex);
-        SceneManager.LoadScene(buildIndex);
-    }
-
-    private void QuitOrStopPlaymode()
-    {
-        if (freezeTimeOnGameOver) Time.timeScale = prevTimeScale;
-
-#if UNITY_EDITOR
-        Debug.Log("[PlayerRespawn] NO -> Stop Playmode (Editor)");
-        UnityEditor.EditorApplication.isPlaying = false;
-#else
-        Debug.Log("[PlayerRespawn] NO -> Application.Quit()");
-        Application.Quit();
-#endif
-    }
 }
