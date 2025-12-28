@@ -39,6 +39,25 @@ public class PlayerMovementController : MonoBehaviour
     private Rigidbody2D rb;
     private PlayerPhysicsStateController phys;
 
+    //ANIMACIONES
+    [Header("Animation")]
+    [SerializeField] private PlayerLocomotionAnimator locomotionAnim;
+
+    private bool prevGrounded;
+
+
+
+
+    [Header("Facing")]
+    [SerializeField] private Transform visualRoot;   // arrastra aquí el hijo "Visual" (donde está el Animator/Sprite)
+    [SerializeField] private bool faceRightByDefault = true;
+    [SerializeField] private float deadzone = 0.01f;
+
+    private bool facingRight;
+
+
+    
+
 
     // En vez de un simple contador bruto, mapeamos los colliders que SON suelo ahora mismo
     private readonly Dictionary<Collider2D, bool> groundedColliders = new Dictionary<Collider2D, bool>();
@@ -56,6 +75,9 @@ public class PlayerMovementController : MonoBehaviour
     private void Awake()
     {
         rb = GetComponent<Rigidbody2D>();
+        if (locomotionAnim == null)
+            locomotionAnim = GetComponentInChildren<PlayerLocomotionAnimator>(true);
+
         phys = GetComponent<PlayerPhysicsStateController>();
 
         telemetry = GameplayTelemetry.Instance;
@@ -64,6 +86,16 @@ public class PlayerMovementController : MonoBehaviour
         {
             telemetry.LogEvent("LEVEL_START", transform.position, "Lab_Tema1_CRISP_PuntosFuga");
         }
+
+        if (visualRoot == null)
+        {
+            // intenta encontrar "Visual" típico
+            var t = transform.Find("Visual");
+            if (t != null) visualRoot = t;
+        }
+        facingRight = faceRightByDefault;
+        ApplyFacing();
+
     }
 
     private void Update()
@@ -95,6 +127,8 @@ public class PlayerMovementController : MonoBehaviour
         // --------------------
         Vector2 v = rb.linearVelocity;
         float inputX = Input.GetAxisRaw(horizontalAxis);  // teclado + stick izq
+        UpdateFacing(inputX);
+
         v.x = inputX * moveSpeed;
         rb.linearVelocity = v;
 
@@ -152,6 +186,9 @@ public class PlayerMovementController : MonoBehaviour
             v = rb.linearVelocity;
             v.y = jumpForce;
             rb.linearVelocity = v;
+
+            locomotionAnim?.NotifyJump(rb);
+
         }
 
         // --------------------
@@ -167,6 +204,9 @@ public class PlayerMovementController : MonoBehaviour
 
             if (DEBUG_MOVEMENT) Debug.Log("DBG -> Jump cut aplicado");
         }
+        
+        locomotionAnim?.TickAirborne(rb, IsGrounded);
+
 
     }
 
@@ -206,10 +246,16 @@ public class PlayerMovementController : MonoBehaviour
             Debug.Log($"DBG -> collider {col.name} groundedNow={groundedNow}, totalGroundColliders={groundedColliders.Count}");
 
         // Telemetría LAND solo al pasar de NO grounded a grounded
-        if (!wasGrounded && isGrounded && telemetry != null)
+        // Telemetría LAND solo al pasar de NO grounded a grounded
+        if (!wasGrounded && isGrounded)
         {
-            telemetry.LogEvent("LAND", transform.position);
+            if (telemetry != null)
+                telemetry.LogEvent("LAND", transform.position);
+
+            locomotionAnim?.NotifyLanded();
         }
+
+
     }
 
         // ---------
@@ -243,4 +289,25 @@ public class PlayerMovementController : MonoBehaviour
             // al salir de la colisión, seguro que ya no es suelo
             SetGroundedForCollider(collision.collider, false);
         }
+
+        private void UpdateFacing(float inputX)
+        {
+            if (visualRoot == null) return;
+
+            if (inputX > deadzone) facingRight = true;
+            else if (inputX < -deadzone) facingRight = false;
+            else return; // no cambies si no hay input
+
+            ApplyFacing();
+        }
+
+        private void ApplyFacing()
+        {
+            if (visualRoot == null) return;
+
+            Vector3 s = visualRoot.localScale;
+            s.x = Mathf.Abs(s.x) * (facingRight ? 1f : -1f);
+            visualRoot.localScale = s;
+        }
+
     }
