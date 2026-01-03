@@ -1,5 +1,5 @@
-using System.Collections;
 using UnityEngine;
+using System.Collections;
 
 [RequireComponent(typeof(Collider2D))]
 public class FlameSparkPickup : MonoBehaviour
@@ -7,6 +7,8 @@ public class FlameSparkPickup : MonoBehaviour
     [Header("Spark Pickup")]
     public float windowDuration = 1.0f;
     public Transform anchorPoint;
+
+    [Header("Consume / Respawn")]
     public bool destroyOnPickup = true;
     public float respawnSeconds = 0f;
 
@@ -14,121 +16,63 @@ public class FlameSparkPickup : MonoBehaviour
     private Collider2D col;
 
     private bool available = true;
-
-    // Trigger-wait-exit (solo para consumo por caminar)
-    private bool waitingForExit = false;
-    private Collider2D holderCol;
-
     private Coroutine respawnCo;
 
     private void Awake()
     {
         sr = GetComponent<SpriteRenderer>();
         col = GetComponent<Collider2D>();
-        col.isTrigger = true;
+
+        if (col != null) col.isTrigger = true;
+        if (anchorPoint == null) anchorPoint = transform;
+
+        available = true;
     }
 
     public Vector2 GetAnchorWorld()
     {
-        return anchorPoint != null
-            ? (Vector2)anchorPoint.position
-            : (Vector2)transform.position;
+        return (anchorPoint != null) ? (Vector2)anchorPoint.position : (Vector2)transform.position;
     }
 
-    // =====================================================
-    // TRIGGER NORMAL (caminar) -> espera Exit
-    // =====================================================
-    private void OnTriggerEnter2D(Collider2D other)
-    {
-        if (!available) return;
+    public bool IsAvailable() => available;
 
-        var rb = other.attachedRigidbody;
-        if (rb == null) return;
-
-        var spark = rb.GetComponent<PlayerSparkBoost>();
-        if (spark == null) return;
-
-        // Si está en dash o ya tiene spark activo, el trigger NO gestiona nada
-        if (spark.IsDashing() || spark.IsSparkActive()) return;
-
-        holderCol = other;
-
-        // CLAVE: AL CAMINAR NO HAY "PICKUP BOUNCE".
-        // Solo activas la ventana de spark anclada.
-        spark.ActivateSpark(windowDuration, GetAnchorWorld());
-
-        Consume(waitForExit: true);
-    }
-
-    private void OnTriggerExit2D(Collider2D other)
-    {
-        if (!waitingForExit) return;
-        if (other != holderCol) return;
-
-        waitingForExit = false;
-        holderCol = null;
-
-        StartRespawn();
-    }
-
-    // =====================================================
-    // DASH/X (rb.Cast) -> TU CÓDIGO LLAMA A ESTO
-    // =====================================================
+    // ====== API que llama PlayerSparkBoost (dash) ======
     public void Consume()
     {
         if (!available) return;
-        Consume(waitForExit: false); // dash: NO esperar Exit (no va a ocurrir)
+        ConsumeInternal();
     }
 
-    // =====================================================
-    // NÚCLEO
-    // =====================================================
-    private void Consume(bool waitForExit)
+    // Alias por compatibilidad si en algún momento lo llamas con otro nombre
+    public void ConsumeImmediate()
     {
-        if (!destroyOnPickup) return;
+        if (!available) return;
+        ConsumeInternal();
+    }
 
+    private void ConsumeInternal()
+    {
         available = false;
 
-        if (sr != null)
-            sr.enabled = false;
+        if (sr != null) sr.enabled = false;
+        if (col != null) col.enabled = false;
 
-        if (respawnSeconds <= 0f)
+        if (destroyOnPickup)
         {
             Destroy(gameObject);
             return;
         }
 
-        if (waitForExit)
+        if (respawnSeconds > 0f)
         {
-            // Camino trigger: dejamos collider activo para que exista Exit
-            waitingForExit = true;
-            return;
+            if (respawnCo != null) StopCoroutine(respawnCo);
+            respawnCo = StartCoroutine(RespawnAfter(respawnSeconds));
         }
-
-        // Camino dash: no existe Exit fiable en tu diseño (ancla/teleport)
-        waitingForExit = false;
-        holderCol = null;
-
-        StartRespawn();
     }
 
-    // =====================================================
-    // RESPAWN
-    // =====================================================
-    private void StartRespawn()
+    private IEnumerator RespawnAfter(float secs)
     {
-        if (respawnCo != null)
-            StopCoroutine(respawnCo);
-
-        respawnCo = StartCoroutine(RespawnAfterTime());
-    }
-
-    private IEnumerator RespawnAfterTime()
-    {
-        // Apaga collider durante cooldown para que no haya re-trigger fantasma
-        if (col != null) col.enabled = false;
-
-        yield return new WaitForSeconds(respawnSeconds);
+        yield return new WaitForSeconds(secs);
 
         available = true;
 
@@ -136,5 +80,23 @@ public class FlameSparkPickup : MonoBehaviour
         if (col != null) col.enabled = true;
 
         respawnCo = null;
+    }
+
+    // ====== Pick-up por caminar (trigger normal) ======
+    private void OnTriggerEnter2D(Collider2D other)
+    {
+        if (!available) return;
+
+        var spark = other.GetComponent<PlayerSparkBoost>() ?? other.GetComponentInParent<PlayerSparkBoost>();
+        if (spark == null) return;
+
+        // Si está en dash o ya tiene spark activo, NO gestionamos nada aquí
+        if (spark.IsDashing() || spark.IsSparkActive()) return;
+
+        // Caminar encima => abre ventana de spark anclada, SIN bounce físico
+        spark.ActivateSpark(windowDuration, GetAnchorWorld());
+
+        // Consumimos (respawn o destroy según config)
+        ConsumeInternal();
     }
 }
