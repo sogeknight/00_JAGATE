@@ -1,0 +1,36 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 6098eaee84c8be94c89734ad1be3b3f4, type: 3}
+  m_Name: TBVFX_Default
+  m_EditorClassIdentifier: Assembly-CSharp::TileBreakVFXProfile
+  useDefaultIfNoMatch: 1
+  defaultVFX:
+    tile: {fileID: 0}
+    count: 18
+    color: {r: 1, g: 0, b: 1, a: 1}
+    size: 0.22
+    lifetime: 1
+    speedMin: 0.4
+    speedMax: 2
+    spreadX: 1
+    spreadY: 1
+  mappings:
+  - tile: {fileID: 11400000, guid: 2bd94d1f8f4540042b1aa313f67a033a, type: 2}
+    count: 25
+    color: {r: 0, g: 0, b: 0, a: 0}
+    size: 0.25
+    lifetime: 1000
+    speedMin: 0.6
+    speedMax: 2.5
+    spreadX: 1
+    spreadY: 1
+  tierMappings: []

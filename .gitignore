@@ -1,0 +1,26 @@
+﻿# Unity
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+[Uu]ser[Ss]ettings/
+[Mm]emoryCaptures/
+
+# Unity PackageCache (no se versiona)
+**/[Pp]ackage[Cc]ache/
+
+# Visual Studio / VSCode
+.vscode/
+.vs/
+*.csproj
+*.sln
+*.slnx
+*.user
+*.userprefs
+
+# OS / local
+.DS_Store
+Thumbs.db
+__git_probe__.txt
