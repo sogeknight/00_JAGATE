@@ -376,6 +376,7 @@ public class RoomGenerator1_0 : MonoBehaviour
 
             var comp = chunkGO.AddComponent<CompositeCollider2D>();
             comp.geometryType = CompositeCollider2D.GeometryType.Polygons;
+            
 
             // WorldMaterial en el CHUNK (esto hace que se rompa por trozos)
             var wm = chunkGO.AddComponent<WorldMaterial>();

@@ -161,4 +161,11 @@ public class WorldMaterial : MonoBehaviour, IBounceImpactReceiver, IPiercingBoun
         Vector2 world2 = p + inward;
         return new Vector3(world2.x, world2.y, 0f);
     }
+
+    // === Estado público (solo lectura) ===
+    public bool IsBroken => isBroken || hp <= 0f;
+    public float CurrentHP => hp;
+
+
+
 }

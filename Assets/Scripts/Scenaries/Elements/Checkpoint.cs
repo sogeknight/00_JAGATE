@@ -11,9 +11,6 @@ public class Checkpoint : MonoBehaviour
     public AudioSource sfx;
     public GameObject activateVfx;
 
-    // Para pruebas: NO bloquees con activated hasta que funcione al 100%
-    // private bool activated = false;
-
     private void Reset()
     {
         var col = GetComponent<Collider2D>();
@@ -22,35 +19,22 @@ public class Checkpoint : MonoBehaviour
 
     private void OnTriggerEnter2D(Collider2D other)
     {
-        // 1) Encuentra al player controller (esto ya te funciona porque "guarda")
-        var player = other.GetComponentInParent<PlayerCheckpointController>();
-        if (player == null) return;
+        if (!other.CompareTag("Player")) return;
 
-        // 2) Set checkpoint
-        player.SetCheckpoint(transform.position);
+        // 1) CANÓNICO: PlayerRespawn guarda y gestiona CONTINUE (tecla C)
+        var respawn = other.GetComponentInParent<PlayerRespawn>();
+        if (respawn == null) return;
 
-        // 3) RECARGA usando la referencia CANÓNICA del player
+        // Guardar el checkpoint real (por escena, según tu PlayerRespawn)
+        respawn.SetCheckpoint(transform);
+
+        // 2) Recargar flame (si existe el script)
         if (refillFlame)
         {
-            if (player.bounce == null)
-                player.bounce = player.GetComponent<PlayerBounceAttack>();
-
-            if (player.bounce != null)
-            {
-                float before = player.bounce.flame;
-                player.bounce.flame = player.bounce.maxFlame;
-
-                Debug.Log($"[Checkpoint] Refill OK | bounceID={player.bounce.GetInstanceID()} | {before:0.##} -> {player.bounce.flame:0.##}");
-            }
-            else
-            {
-                Debug.LogWarning("[Checkpoint] ERROR: PlayerCheckpointController no tiene referencia a PlayerBounceAttack.");
-            }
+            var bounce = other.GetComponentInParent<PlayerBounceAttack>();
+            if (bounce != null)
+                bounce.flame = bounce.maxFlame;
         }
-
-        // 4) Guarda DESPUÉS de recargar
-        player.SaveCheckpointToPrefs(checkpointId, transform.position);
-
 
         if (sfx) sfx.Play();
         if (activateVfx) activateVfx.SetActive(true);

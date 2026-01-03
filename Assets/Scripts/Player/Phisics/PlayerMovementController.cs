@@ -6,7 +6,6 @@ using System.Collections.Generic;
 [RequireComponent(typeof(PlayerPhysicsStateController))]
 public class PlayerMovementController : MonoBehaviour
 {
-
     [Header("Movimiento")]
     public float moveSpeed = 5f;
     public float jumpForce = 7f;
@@ -20,50 +19,52 @@ public class PlayerMovementController : MonoBehaviour
     public string jumpButton = "Jump";    // mando (X en Play)
     public string horizontalAxis = "Horizontal"; // eje de movimiento (stick izq)
 
-
     [Header("Ground Detection (por colisiones)")]
     public string groundTag = "Ground";
 
     [Range(0f, 1f)]
-    public float groundNormalThreshold = 0.9f;
-    // solo normales MUY hacia arriba cuentan como suelo
+    public float groundNormalThreshold = 0.9f; // solo normales MUY hacia arriba cuentan como suelo
 
     [Header("Coyote Time / Jump Buffer")]
     public float coyoteTime = 0.1f;       // margen tras dejar el suelo
     public float jumpBufferTime = 0.25f;  // margen desde que pulsas hasta que pisas suelo
 
-    // Flag para que otros sistemas (dash, cinemáticas, etc.) puedan bloquear el movimiento
     [HideInInspector]
     public bool movementLocked = false;
 
     private Rigidbody2D rb;
     private PlayerPhysicsStateController phys;
 
-    //ANIMACIONES
+    // ANIMACIONES
     [Header("Animation")]
     [SerializeField] private PlayerLocomotionAnimator locomotionAnim;
     [SerializeField] private PlayerStaticFX staticFX;
 
-
-    private bool prevGrounded;
-
-
-
-
     [Header("Facing")]
-    [SerializeField] private Transform visualRoot;   // arrastra aquí el hijo "Visual" (donde está el Animator/Sprite)
+    [SerializeField] private Transform visualRoot;   // hijo "Visual"
     [SerializeField] private bool faceRightByDefault = true;
     [SerializeField] private float deadzone = 0.01f;
 
     private bool facingRight;
 
+    [Header("Ground Probe (anti-atascos)")]
+    public LayerMask groundMask;
+    public Vector2 groundProbeSize = new Vector2(0.6f, 0.12f);
+    public float groundProbeDistance = 0.08f;
+    public Vector2 groundProbeOffset = new Vector2(0f, -0.5f);
+    private bool groundedByProbe;
 
-    
+    [Header("Unstuck (anti-picos)")]
+    public float stuckSpeedThreshold = 0.02f;
+    public float stuckTimeToNudge = 0.12f;
+    public float nudgeUpDistance = 0.06f;
+    private float stuckTimer = 0f;
 
-
-    // En vez de un simple contador bruto, mapeamos los colliders que SON suelo ahora mismo
+    // Grounded por colisiones
     private readonly Dictionary<Collider2D, bool> groundedColliders = new Dictionary<Collider2D, bool>();
-    private bool isGrounded => groundedColliders.Count > 0;
+
+    // Grounded final: colisiones válidas O probe
+    private bool isGrounded => groundedColliders.Count > 0 || groundedByProbe;
     public bool IsGrounded => isGrounded;
 
     // timers internos
@@ -77,67 +78,78 @@ public class PlayerMovementController : MonoBehaviour
     private void Awake()
     {
         rb = GetComponent<Rigidbody2D>();
+
         if (locomotionAnim == null)
             locomotionAnim = GetComponentInChildren<PlayerLocomotionAnimator>(true);
 
         if (staticFX == null)
             staticFX = GetComponentInChildren<PlayerStaticFX>(true);
 
-
         phys = GetComponent<PlayerPhysicsStateController>();
 
         telemetry = GameplayTelemetry.Instance;
-
         if (telemetry != null)
-        {
             telemetry.LogEvent("LEVEL_START", transform.position, "Lab_Tema1_CRISP_PuntosFuga");
-        }
 
         if (visualRoot == null)
         {
-            // intenta encontrar "Visual" típico
             var t = transform.Find("Visual");
             if (t != null) visualRoot = t;
         }
+
         facingRight = faceRightByDefault;
         ApplyFacing();
-
     }
 
     private void Update()
     {
-
-
-        for (int i = 0; i < 20; i++)
-        {
-            if (Input.GetKeyDown((KeyCode)((int)KeyCode.JoystickButton0 + i)))
-            {
-                Debug.Log("BOTÓN PULSADO: JoystickButton" + i);
-            }
-        }
-
         // Si algún sistema externo bloquea movimiento, no aplicamos input
         if (movementLocked)
         {
-            if (DEBUG_MOVEMENT)
-                Debug.Log("DBG -> movementLocked, no aplico input");
+            if (DEBUG_MOVEMENT) Debug.Log("DBG -> movementLocked, no aplico input");
             return;
         }
+
         // Si estás en Dash o SparkAnchor, NO TOQUES el Rigidbody
         if (phys != null && (phys.IsInDash() || phys.IsInSparkAnchor()))
             return;
 
+        // --------------------
+        // INPUT HORIZONTAL
+        // --------------------
+        float inputX = Input.GetAxisRaw(horizontalAxis);  // teclado + stick izq
+        UpdateFacing(inputX);
+
+        // Ground probe: evita softlocks en picos/esquinas
+        groundedByProbe = ProbeGround();
 
         // --------------------
         // MOVIMIENTO HORIZONTAL
         // --------------------
         Vector2 v = rb.linearVelocity;
-        float inputX = Input.GetAxisRaw(horizontalAxis);  // teclado + stick izq
-        UpdateFacing(inputX);
-
         v.x = inputX * moveSpeed;
         rb.linearVelocity = v;
 
+        // --------------------
+        // UNSTUCK (anti picos)
+        // --------------------
+        // Si estás empujando pero NO avanzas y NO estás grounded, te despega ligeramente hacia arriba.
+        bool pushing = Mathf.Abs(inputX) > 0.1f;
+        bool basicallyNotMoving = Mathf.Abs(rb.linearVelocity.x) < stuckSpeedThreshold && Mathf.Abs(rb.linearVelocity.y) < 0.2f;
+
+        if (pushing && basicallyNotMoving && !isGrounded)
+        {
+            stuckTimer += Time.deltaTime;
+            if (stuckTimer >= stuckTimeToNudge)
+            {
+                rb.position += Vector2.up * nudgeUpDistance;
+                stuckTimer = 0f;
+            }
+        }
+        else
+        {
+            stuckTimer = 0f;
+        }
 
         // --------------------
         // COYOTE TIME
@@ -150,58 +162,43 @@ public class PlayerMovementController : MonoBehaviour
         if (coyoteTimer < 0f) coyoteTimer = 0f;
 
         // --------------------
-        // JUMP BUFFER (solo GetKeyDown)
+        // JUMP BUFFER
         // --------------------
-        // JUMP BUFFER (teclado o mando)
-        bool jumpPressed  = Input.GetKeyDown(jumpKey) || Input.GetKeyDown(KeyCode.JoystickButton0);
-
+        bool jumpPressed = Input.GetKeyDown(jumpKey) || Input.GetKeyDown(KeyCode.JoystickButton0);
         if (jumpPressed)
-        {
             jumpBufferTimer = jumpBufferTime;
-        }
         else
-        {
             jumpBufferTimer -= Time.deltaTime;
-        }
-
 
         if (jumpBufferTimer < 0f) jumpBufferTimer = 0f;
 
         // --------------------
-        // SALTO:
-        //  - tiene que haber buffer activo
-        //  - tiene que quedar coyote
+        // SALTO (buffer + coyote)
         // --------------------
         bool canJumpNow = (coyoteTimer > 0f);
         bool wantJump = (jumpBufferTimer > 0f) && canJumpNow;
 
         if (wantJump)
         {
-            // consumir timers
             jumpBufferTimer = 0f;
             coyoteTimer = 0f;
 
             if (DEBUG_MOVEMENT) Debug.Log("DBG -> JUMP ejecutado");
 
-            // telemetría
             if (telemetry != null)
-            {
-                telemetry.LogEvent("JUMP", transform.position, $"velX={v.x:F2}");
-            }
+                telemetry.LogEvent("JUMP", transform.position, $"velX={rb.linearVelocity.x:F2}");
 
             v = rb.linearVelocity;
             v.y = jumpForce;
             rb.linearVelocity = v;
 
             locomotionAnim?.NotifyJump(rb);
-
         }
 
         // --------------------
         // SALTO VARIABLE
         // --------------------
-        bool jumpReleased = Input.GetKeyUp(jumpKey)   || Input.GetKeyUp(KeyCode.JoystickButton0);
-
+        bool jumpReleased = Input.GetKeyUp(jumpKey) || Input.GetKeyUp(KeyCode.JoystickButton0);
         if (rb.linearVelocity.y > 0f && jumpReleased)
         {
             v = rb.linearVelocity;
@@ -210,12 +207,9 @@ public class PlayerMovementController : MonoBehaviour
 
             if (DEBUG_MOVEMENT) Debug.Log("DBG -> Jump cut aplicado");
         }
-        
+
         locomotionAnim?.TickAirborne(rb, IsGrounded);
         staticFX?.Tick(IsGrounded, inputX);
-
-
-
     }
 
     // ---------
@@ -227,13 +221,13 @@ public class PlayerMovementController : MonoBehaviour
         {
             // punto por debajo del centro del jugador (pies, no cabeza)
             bool contactBelowPlayer = contact.point.y <= transform.position.y - 0.05f;
+
             // normal claramente hacia arriba
             bool normalUpEnough = contact.normal.y >= groundNormalThreshold;
 
             if (contactBelowPlayer && normalUpEnough)
                 return true;
         }
-
         return false;
     }
 
@@ -242,19 +236,14 @@ public class PlayerMovementController : MonoBehaviour
         bool wasGrounded = isGrounded;
 
         if (groundedNow)
-        {
             groundedColliders[col] = true;
-        }
         else
-        {
             groundedColliders.Remove(col);
-        }
 
         if (DEBUG_MOVEMENT)
             Debug.Log($"DBG -> collider {col.name} groundedNow={groundedNow}, totalGroundColliders={groundedColliders.Count}");
 
-        // Telemetría LAND solo al pasar de NO grounded a grounded
-        // Telemetría LAND solo al pasar de NO grounded a grounded
+        // LAND solo al pasar de NO grounded a grounded (por colisiones)
         if (!wasGrounded && isGrounded)
         {
             if (telemetry != null)
@@ -262,60 +251,83 @@ public class PlayerMovementController : MonoBehaviour
 
             locomotionAnim?.NotifyLanded();
         }
-
-
     }
 
-        // ---------
-        // COLISIONES
-        // ---------
-        private void OnCollisionEnter2D(Collision2D collision)
-        {
-            if (!collision.collider.CompareTag(groundTag))
-                return;
+    // ---------
+    // COLISIONES
+    // ---------
+    private void OnCollisionEnter2D(Collision2D collision)
+    {
+        if (!collision.collider.CompareTag(groundTag))
+            return;
 
-            bool hasGroundContact = HasValidGroundContact(collision);
-            SetGroundedForCollider(collision.collider, hasGroundContact);
-        }
-
-        private void OnCollisionStay2D(Collision2D collision)
-        {
-            if (!collision.collider.CompareTag(groundTag))
-                return;
-
-            // si antes estabas tocando la parte superior, pero ahora solo estás rozando el lateral,
-            // HasValidGroundContact() pasará a false y se quitará ese collider del "suelo".
-            bool hasGroundContact = HasValidGroundContact(collision);
-            SetGroundedForCollider(collision.collider, hasGroundContact);
-        }
-
-        private void OnCollisionExit2D(Collision2D collision)
-        {
-            if (!collision.collider.CompareTag(groundTag))
-                return;
-
-            // al salir de la colisión, seguro que ya no es suelo
-            SetGroundedForCollider(collision.collider, false);
-        }
-
-        private void UpdateFacing(float inputX)
-        {
-            if (visualRoot == null) return;
-
-            if (inputX > deadzone) facingRight = true;
-            else if (inputX < -deadzone) facingRight = false;
-            else return; // no cambies si no hay input
-
-            ApplyFacing();
-        }
-
-        private void ApplyFacing()
-        {
-            if (visualRoot == null) return;
-
-            Vector3 s = visualRoot.localScale;
-            s.x = Mathf.Abs(s.x) * (facingRight ? 1f : -1f);
-            visualRoot.localScale = s;
-        }
-
+        bool hasGroundContact = HasValidGroundContact(collision);
+        SetGroundedForCollider(collision.collider, hasGroundContact);
     }
+
+    private void OnCollisionStay2D(Collision2D collision)
+    {
+        if (!collision.collider.CompareTag(groundTag))
+            return;
+
+        bool hasGroundContact = HasValidGroundContact(collision);
+        SetGroundedForCollider(collision.collider, hasGroundContact);
+    }
+
+    private void OnCollisionExit2D(Collision2D collision)
+    {
+        if (!collision.collider.CompareTag(groundTag))
+            return;
+
+        SetGroundedForCollider(collision.collider, false);
+    }
+
+    // ---------
+    // FACING
+    // ---------
+    private void UpdateFacing(float inputX)
+    {
+        if (visualRoot == null) return;
+
+        if (inputX > deadzone) facingRight = true;
+        else if (inputX < -deadzone) facingRight = false;
+        else return;
+
+        ApplyFacing();
+    }
+
+    private void ApplyFacing()
+    {
+        if (visualRoot == null) return;
+
+        Vector3 s = visualRoot.localScale;
+        s.x = Mathf.Abs(s.x) * (facingRight ? 1f : -1f);
+        visualRoot.localScale = s;
+    }
+
+    // ---------
+    // PROBE GROUND (OverlapBox + BoxCast)
+    // ---------
+    private bool ProbeGround()
+    {
+        Vector2 center = (Vector2)transform.position + groundProbeOffset;
+
+        // 1) Overlap directo en pies
+        Collider2D hit = Physics2D.OverlapBox(center, groundProbeSize, 0f, groundMask);
+        if (hit != null) return true;
+
+        // 2) Cast cortito hacia abajo
+        RaycastHit2D cast = Physics2D.BoxCast(center, groundProbeSize, 0f, Vector2.down, groundProbeDistance, groundMask);
+        return cast.collider != null;
+    }
+
+#if UNITY_EDITOR
+    private void OnDrawGizmosSelected()
+    {
+        // Visualiza el probe en el editor
+        Gizmos.color = Color.yellow;
+        Vector2 center = (Vector2)transform.position + groundProbeOffset;
+        Gizmos.DrawWireCube(center, groundProbeSize);
+    }
+#endif
+}

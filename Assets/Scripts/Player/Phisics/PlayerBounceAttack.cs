@@ -148,6 +148,31 @@ public class PlayerBounceAttack : MonoBehaviour
         CacheLayerIds(hazardLayers, hazardLayerIds);
     }
 
+    /// <summary>
+    /// CORTE DURO: se llama desde SparkBoost cuando el player recoge un Spark.
+    /// Esto elimina cualquier "trayecto pendiente" del bounce y evita que continúe.
+    /// </summary>
+    public void ForceCancelFromSpark()
+    {
+        // Corta de raíz el movimiento pendiente
+        remainingDistance = 0f;
+
+        // Mata estados
+        if (isAiming) EndAiming();
+        if (isBouncing) EndBounce();
+
+        // Por seguridad: limpia todo
+        impactedThisBounce.Clear();
+        piercedThisBounce.Clear();
+
+        SetAimBounceCollisionIgnore(false);
+        ClearPreview();
+
+        // Asegura desbloqueo y flags
+        movement.movementLocked = false;
+        isInvincible = false;
+    }
+
     private void CacheLayerIds(LayerMask mask, List<int> outList)
     {
         outList.Clear();
@@ -160,12 +185,11 @@ public class PlayerBounceAttack : MonoBehaviour
 
     private void Update()
     {
+        // Si Spark está activo/dashing => bounce fuera INMEDIATO.
+        // Además usamos ForceCancelFromSpark para cortar remainingDistance YA.
         if (spark != null && (spark.IsSparkActive() || spark.IsDashing()))
         {
-            if (isAiming) EndAiming();
-            if (isBouncing) EndBounce();
-            SetAimBounceCollisionIgnore(false);
-            ClearPreview();
+            ForceCancelFromSpark();
             return;
         }
 
@@ -204,6 +228,7 @@ public class PlayerBounceAttack : MonoBehaviour
 
     private void FixedUpdate()
     {
+        // Corte duro también en FixedUpdate por si Spark se activa entre ticks
         if (spark != null && (spark.IsSparkActive() || spark.IsDashing()))
             return;
 
@@ -245,7 +270,6 @@ public class PlayerBounceAttack : MonoBehaviour
 
         Vector2 dir = (bounceDir.sqrMagnitude > 0.001f ? bounceDir : aimDirection).normalized;
 
-
         int safety = 0;
         const int MAX_INTERNAL_HITS = 24;
 
@@ -253,7 +277,6 @@ public class PlayerBounceAttack : MonoBehaviour
         {
             Vector2 origin = rb.position;
 
-            // CLAVE: filtramos hits para NO BLOQUEARNOS con colliders ya "pierced"
             if (!TryCircleCastFiltered(origin, ballRadius, dir, moveDist + skin, bounceLayers, out RaycastHit2D hit))
             {
                 rb.MovePosition(origin + dir * moveDist);
@@ -286,9 +309,7 @@ public class PlayerBounceAttack : MonoBehaviour
 
             bool broke = ApplyPiercingImpact(hit.collider, dir, bounceDamage, out _);
 
-
-
-            // ---------------- Pierce: si rompe, NO rebota: sigue recto ----------------
+            // Pierce: si rompe, no rebota, sigue recto
             if (broke)
             {
                 float desiredPush = Mathf.Max(pierceSeparationMin, ballRadius * pierceSeparationRadiusFactor);
@@ -314,15 +335,13 @@ public class PlayerBounceAttack : MonoBehaviour
                     return;
                 }
 
-                // Seguimos recto (no rebote)
                 if (moveDist <= 0f)
                     return;
 
                 continue;
             }
-            // ------------------------------------------------------------------------
 
-            // Rebote real (no pierced): reflect con la normal del collider
+            // Rebote real
             bounceDir = Vector2.Reflect(dir, hit.normal).normalized;
 
             if (useFlame && flameCostPerBounce > 0f)
@@ -344,10 +363,6 @@ public class PlayerBounceAttack : MonoBehaviour
             EndBounce();
     }
 
-    /// <summary>
-    /// CircleCast filtrado: ignora colliders ya marcados como piercedThisBounce para que NO bloqueen el avance.
-    /// Además: cuando hay hits casi empatados (muy común pegado a tiles/chunks), prioriza PIERCEABLE sobre sólido.
-    /// </summary>
     private bool TryCircleCastFiltered(Vector2 origin, float radius, Vector2 dir, float distance, LayerMask mask, out RaycastHit2D bestHit)
     {
         bestHit = default;
@@ -357,11 +372,7 @@ public class PlayerBounceAttack : MonoBehaviour
         bool bestIsPierceable = false;
         bool found = false;
 
-        // Empate más generoso para chunks pegados a tiles
         const float TIE_EPS = 0.05f;
-
-        // Si estás “pegado” a un sólido, CircleCastAll devuelve distance ~0. Eso causa rebote falso.
-        // Ignoramos SOLO sólidos (no pierceables) con distancia casi 0.
         float zeroReject = Mathf.Max(0.001f, skin * 1.5f);
 
         for (int i = 0; i < hits.Length; i++)
@@ -375,10 +386,7 @@ public class PlayerBounceAttack : MonoBehaviour
 
             bool isPierceable = (h.collider.GetComponentInParent<IPiercingBounceReceiver>() != null);
 
-            // CLAVE: si NO es pierceable y está a distancia ~0 (contacto), lo ignoramos.
-            // Esto elimina el rebote “porque estás pegado al tile/chunk”.
-            if (!isPierceable && h.distance <= zeroReject)
-                continue;
+
 
             float d = h.distance;
 
@@ -391,7 +399,6 @@ public class PlayerBounceAttack : MonoBehaviour
                 continue;
             }
 
-            // Más cercano gana
             if (d + TIE_EPS < bestDist)
             {
                 bestDist = d;
@@ -400,7 +407,6 @@ public class PlayerBounceAttack : MonoBehaviour
                 continue;
             }
 
-            // Empate: prioriza pierceable
             if (Mathf.Abs(d - bestDist) <= TIE_EPS)
             {
                 if (!bestIsPierceable && isPierceable)
@@ -415,12 +421,6 @@ public class PlayerBounceAttack : MonoBehaviour
         return found;
     }
 
-
-    /// <summary>
-    /// Avanza en dir una distancia como máximo "distance" SIN entrar en sólidos de mundo (worldSolidLayers).
-    /// Ignora el collider recién atravesado para evitar quedarse pegado.
-    /// Devuelve lo realmente avanzado.
-    /// </summary>
     private float SafeAdvanceWithoutEnteringWorldSolids(Vector2 dir, float distance, Collider2D ignoreCol)
     {
         if (distance <= 0f) return 0f;
@@ -430,7 +430,6 @@ public class PlayerBounceAttack : MonoBehaviour
 
         int mask = worldSolidLayers.value;
 
-        // fallback si no lo configuraste (NO recomendado), quitando enemy/hazard del bounceLayers
         if (mask == 0)
             mask = (bounceLayers.value & ~enemyLayers.value & ~hazardLayers.value);
 
@@ -467,7 +466,6 @@ public class PlayerBounceAttack : MonoBehaviour
             return allowed;
         }
 
-        // micro-nudge si no podemos avanzar nada, para evitar quedarnos pegados al borde del enemy
         float tiny = Mathf.Min(pierceSeparationMin, distance);
         if (tiny > 0f)
         {
@@ -482,37 +480,39 @@ public class PlayerBounceAttack : MonoBehaviour
         return 0f;
     }
 
-    // Devuelve true si ese impacto se rompe / atraviesa (pierce)
     private bool ApplyPiercingImpact(Collider2D col, Vector2 direction, float incomingDamage, out float remainingDamage)
     {
         remainingDamage = incomingDamage;
         if (col == null) return false;
 
+        // Si ya lo “pierceaste” en este bounce, compórtate como si NO existiera:
+        // Esto evita el bug de “pegado al collider => rebota / comportamientos raros”.
+        if (piercedThisBounce.Contains(col))
+            return true;
+
+        // Evita aplicar daño 200 veces por micro-hits en el mismo bounce
+        if (impactedThisBounce.Contains(col))
+            return false;
+
         var receiverPierce = col.GetComponentInParent<IPiercingBounceReceiver>();
         if (receiverPierce != null)
         {
-            // ya atravesado en ESTE bounce => no daño, pero atraviesa
-            if (piercedThisBounce.Contains(col))
-            {
-                remainingDamage = incomingDamage;
-                return true;
-            }
+            impactedThisBounce.Add(col);
 
             var impact = new BounceImpactData((int)Mathf.Ceil(incomingDamage), direction, gameObject);
             receiverPierce.ApplyPiercingBounce(impact, incomingDamage, out float rem);
             remainingDamage = rem;
 
-            // marcamos SIEMPRE para evitar multi-hit en el mismo bounce
-            piercedThisBounce.Add(col);
+            // CRITERIO ÚNICO: solo “pierce” si realmente se ha roto
+            bool brokeNow = IsActuallyBrokenNow(col);
 
-            // si es pierceable, SIEMPRE atraviesa (rompa o no rompa)
-            return true;
+            if (brokeNow)
+                piercedThisBounce.Add(col);
+
+            return brokeNow; // true => seguir recto; false => rebote normal
         }
 
-        // fallback sólido (no pierce)
-        if (impactedThisBounce.Contains(col))
-            return false;
-
+        // Si NO es pierceable, es impacto normal (rebote)
         var receiver = col.GetComponentInParent<IBounceImpactReceiver>();
         if (receiver != null)
         {
@@ -523,6 +523,22 @@ public class PlayerBounceAttack : MonoBehaviour
         remainingDamage = 0f;
         return false;
     }
+
+    private bool IsActuallyBrokenNow(Collider2D col)
+    {
+        if (col == null) return true;
+        if (!col.enabled) return true;
+        if (!col.gameObject.activeInHierarchy) return true;
+
+        var wm = col.GetComponentInParent<WorldMaterial>();
+        if (wm != null)
+            return wm.IsBroken;   // <- ESTO ES LO REAL (hp/isBroken)
+
+        return false;
+    }
+
+
+
 
     // ================== LLAMA ==================
 

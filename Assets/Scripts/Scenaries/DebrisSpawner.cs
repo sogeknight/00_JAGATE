@@ -1,4 +1,5 @@
 using UnityEngine;
+using System.Collections.Generic;
 
 public class DebrisSpawner : MonoBehaviour
 {
@@ -11,13 +12,34 @@ public class DebrisSpawner : MonoBehaviour
     public int emitCount = 24;
     public Color startColor = Color.white;
     public float startSize = 0.25f;
-    public float startLifetime = 9.2f;
+    public float startLifetime = 2.5f;
 
     [Header("Motion (Default)")]
     public float speedMin = 0.5f;
     public float speedMax = 2.5f;
     public float spreadX = 1.0f;
     public float spreadY = 1.0f;
+
+    [Header("Anti-spam (crítico)")]
+    [Tooltip("Máximo de partículas que este spawner puede emitir por frame. Mantiene la cadencia sin inundar.")]
+    public int maxEmitPerFrame = 10;
+
+    [Tooltip("Si muchos subtiles rompen en el mismo frame, se agrupan en celdas. Más grande = más agrupación, menos spam.")]
+    public float mergeCellSize = 0.5f;
+
+    private struct Req
+    {
+        public Vector3 pos;
+        public int count;
+        public Color color;
+        public float size;
+        public float lifetime;
+        public float vMin, vMax;
+        public float sX, sY;
+    }
+
+    private readonly List<Req> queue = new List<Req>(256);
+    private readonly Dictionary<Vector2Int, int> cellToReqIndex = new Dictionary<Vector2Int, int>(256);
 
     private void Awake()
     {
@@ -36,27 +58,15 @@ public class DebrisSpawner : MonoBehaviour
         em.enabled = false;
 
         ps.Clear(true);
-
     }
 
-
-    // Tu API vieja (la conservamos)
+    // API vieja
     public void Spawn(Vector3 worldPos, int count)
     {
-        SpawnCustom(
-            worldPos: worldPos,
-            count: count,
-            startColor: startColor,
-            startSize: startSize,
-            startLifetime: startLifetime,
-            speedMin: speedMin,
-            speedMax: speedMax,
-            spreadX: spreadX,
-            spreadY: spreadY
-        );
+        SpawnCustom(worldPos, count, startColor, startSize, startLifetime, speedMin, speedMax, spreadX, spreadY);
     }
 
-    // NUEVA API (para tu TileBreakVFXManager)
+    // API nueva
     public void SpawnCustom(
         Vector3 worldPos,
         int count,
@@ -69,50 +79,91 @@ public class DebrisSpawner : MonoBehaviour
         float spreadY
     )
     {
-        Debug.Log("[SPAWNER] SpawnCustom");
-        if (ps == null) { Debug.LogError("[DebrisSpawner] ps NULL."); return; }
+        if (ps == null) return;
         if (count <= 0) return;
 
         worldPos.z = 0f;
 
-        if (!ps.gameObject.activeInHierarchy)
+        // Encola y agrupa por celda para que 30 subtiles no sean 30 bursts separados.
+        Vector2Int cell = new Vector2Int(
+            Mathf.FloorToInt(worldPos.x / Mathf.Max(0.0001f, mergeCellSize)),
+            Mathf.FloorToInt(worldPos.y / Mathf.Max(0.0001f, mergeCellSize))
+        );
+
+        if (cellToReqIndex.TryGetValue(cell, out int idx))
         {
-            Debug.LogError("[DebrisSpawner] ParticleSystem GameObject INACTIVO.");
+            // Sumamos cantidad, cap suave (evita explosiones)
+            var r = queue[idx];
+            r.count += count;
+            queue[idx] = r;
             return;
         }
 
+        var req = new Req
+        {
+            pos = worldPos,
+            count = count,
+            color = startColor,
+            size = startSize,
+            lifetime = startLifetime,
+            vMin = speedMin,
+            vMax = speedMax,
+            sX = spreadX,
+            sY = spreadY
+        };
+
+        cellToReqIndex[cell] = queue.Count;
+        queue.Add(req);
+    }
+
+    private void LateUpdate()
+    {
+        Flush();
+    }
+
+    private void Flush()
+    {
+        if (ps == null) return;
+        if (queue.Count == 0) return;
+
+        if (!ps.gameObject.activeInHierarchy) { queue.Clear(); cellToReqIndex.Clear(); return; }
         if (!ps.isPlaying) ps.Play(true);
+
+        int budget = Mathf.Max(1, maxEmitPerFrame);
+        var main = ps.main;
+        bool local = (main.simulationSpace == ParticleSystemSimulationSpace.Local);
 
         var emitParams = new ParticleSystem.EmitParams();
 
-        for (int i = 0; i < count; i++)
+        // Emitimos hasta agotar budget, distribuyendo entre requests
+        for (int r = 0; r < queue.Count && budget > 0; r++)
         {
-            var main = ps.main;
+            var q = queue[r];
+            int n = Mathf.Min(q.count, budget);
 
-            if (main.simulationSpace == ParticleSystemSimulationSpace.Local)
+            for (int i = 0; i < n; i++)
             {
-                emitParams.position = ps.transform.InverseTransformPoint(worldPos);
+                emitParams.position = local ? ps.transform.InverseTransformPoint(q.pos) : q.pos;
+
+                float vx = Random.Range(-q.sX, q.sX);
+                float vy = Random.Range(-q.sY, q.sY);
+
+                Vector3 v = (q.vMax <= 0f)
+                    ? Vector3.zero
+                    : new Vector3(vx, vy, 0f).normalized * Random.Range(q.vMin, q.vMax);
+
+                emitParams.velocity = v;
+                emitParams.startLifetime = q.lifetime;
+                emitParams.startSize = q.size;
+                emitParams.startColor = q.color;
+
+                ps.Emit(emitParams, 1);
             }
-            else
-            {
-                emitParams.position = worldPos;
-            }
 
-
-            float vx = Random.Range(-spreadX, spreadX);
-            float vy = Random.Range(-spreadY, spreadY);
-
-            Vector3 v = (speedMax <= 0f)
-                ? Vector3.zero
-                : new Vector3(vx, vy, 0f).normalized * Random.Range(speedMin, speedMax);
-
-            emitParams.velocity = v;
-            emitParams.startLifetime = startLifetime;
-            emitParams.startSize = startSize;
-            emitParams.startColor = startColor;
-
-            ps.Emit(emitParams, 1);
+            budget -= n;
         }
-    }
 
+        queue.Clear();
+        cellToReqIndex.Clear();
+    }
 }

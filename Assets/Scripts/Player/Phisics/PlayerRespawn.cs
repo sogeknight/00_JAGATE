@@ -30,12 +30,24 @@ public class PlayerRespawn : MonoBehaviour
     [Header("Physics reset (Unity 6)")]
     public bool resetVelocityOnTeleport = true;
 
+    [Header("Editor behavior")]
+    [Tooltip("En el Editor, al dar Play, borra el checkpoint guardado para que CONTINUE solo funcione si lo has tocado en ESTA sesión.")]
+    public bool editorClearCheckpointOnPlay = true;
+
+
     // ===== PlayerPrefs keys =====
     private const string PREF_RUNMODE = "RUN_MODE"; // 0 NEW, 1 CONTINUE
     private const string PREF_HAS = "CP_HAS";
     private const string PREF_X = "CP_X";
     private const string PREF_Y = "CP_Y";
     private const string PREF_ID = "CP_ID";
+
+    // Keys por escena (evita que se mezcle entre escenas)
+    private string K(string baseKey)
+    {
+        return $"{baseKey}__{SceneManager.GetActiveScene().name}";
+    }
+
 
     private Rigidbody2D rb;
     private Vector3 initialSpawnPos;
@@ -50,8 +62,20 @@ public class PlayerRespawn : MonoBehaviour
 
     private void Start()
     {
+    #if UNITY_EDITOR
+        // En Editor: Play normal = NEW siempre
+        SetRunMode(0);
+
+        // Y además: si quieres que C solo funcione si has tocado checkpoint en ESTA sesión,
+        // borra el checkpoint persistido al arrancar Play.
+        if (editorClearCheckpointOnPlay)
+            ClearSavedCheckpoint();
+    #endif
+
         ApplySpawnForSceneEntry();
     }
+
+
 
     private void Update()
     {
@@ -174,37 +198,42 @@ public class PlayerRespawn : MonoBehaviour
 
     private bool HasSavedCheckpoint()
     {
-        return useCheckpoint && PlayerPrefs.GetInt(PREF_HAS, 0) == 1;
+        return useCheckpoint && PlayerPrefs.GetInt(K(PREF_HAS), 0) == 1;
     }
+
 
     private Vector3 GetSavedCheckpointPosition()
     {
-        float x = PlayerPrefs.GetFloat(PREF_X, initialSpawnPos.x);
-        float y = PlayerPrefs.GetFloat(PREF_Y, initialSpawnPos.y);
+        float x = PlayerPrefs.GetFloat(K(PREF_X), initialSpawnPos.x);
+        float y = PlayerPrefs.GetFloat(K(PREF_Y), initialSpawnPos.y);
         return new Vector3(x, y, transform.position.z);
     }
 
+
     private void SaveCheckpointPrefs(string id, Vector3 p)
     {
-        PlayerPrefs.SetInt(PREF_HAS, 1);
-        PlayerPrefs.SetFloat(PREF_X, p.x);
-        PlayerPrefs.SetFloat(PREF_Y, p.y);
-        PlayerPrefs.SetString(PREF_ID, id);
+        PlayerPrefs.SetInt(K(PREF_HAS), 1);
+        PlayerPrefs.SetFloat(K(PREF_X), p.x);
+        PlayerPrefs.SetFloat(K(PREF_Y), p.y);
+        PlayerPrefs.SetString(K(PREF_ID), id);
         PlayerPrefs.Save();
     }
 
+
+
     public void ClearSavedCheckpoint()
     {
-        PlayerPrefs.DeleteKey(PREF_HAS);
-        PlayerPrefs.DeleteKey(PREF_X);
-        PlayerPrefs.DeleteKey(PREF_Y);
-        PlayerPrefs.DeleteKey(PREF_ID);
+        PlayerPrefs.DeleteKey(K(PREF_HAS));
+        PlayerPrefs.DeleteKey(K(PREF_X));
+        PlayerPrefs.DeleteKey(K(PREF_Y));
+        PlayerPrefs.DeleteKey(K(PREF_ID));
         PlayerPrefs.Save();
 
         currentCheckpoint = null;
 
-        Debug.Log("[PlayerRespawn] ClearSavedCheckpoint()");
+        Debug.Log($"[PlayerRespawn] ClearSavedCheckpoint() (scene={SceneManager.GetActiveScene().name})");
     }
+
 
     private int GetRunMode()
     {
