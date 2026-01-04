@@ -21,9 +21,9 @@ TagManager:
   - Void
   - Goal
   - Hazard
-  - 
-  - 
-  - 
+  - PlayerBody
+  - PickupSensor
+  - Pickup
   - 
   - 
   - 

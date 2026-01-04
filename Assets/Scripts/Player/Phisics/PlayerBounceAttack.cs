@@ -500,17 +500,17 @@ public class PlayerBounceAttack : MonoBehaviour
             impactedThisBounce.Add(col);
 
             var impact = new BounceImpactData((int)Mathf.Ceil(incomingDamage), direction, gameObject);
-            receiverPierce.ApplyPiercingBounce(impact, incomingDamage, out float rem);
+
+            // CLAVE: usa el bool de la interfaz. Eso define si atraviesas o rebotas.
+            bool pierced = receiverPierce.ApplyPiercingBounce(impact, incomingDamage, out float rem);
             remainingDamage = rem;
 
-            // CRITERIO ÚNICO: solo “pierce” si realmente se ha roto
-            bool brokeNow = IsActuallyBrokenNow(col);
-
-            if (brokeNow)
+            if (pierced)
                 piercedThisBounce.Add(col);
 
-            return brokeNow; // true => seguir recto; false => rebote normal
+            return pierced; // true => seguir recto; false => rebote normal
         }
+
 
         // Si NO es pierceable, es impacto normal (rebote)
         var receiver = col.GetComponentInParent<IBounceImpactReceiver>();
