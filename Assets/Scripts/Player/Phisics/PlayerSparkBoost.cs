@@ -184,6 +184,16 @@ public class PlayerSparkBoost : MonoBehaviour
     [Range(0, 20)] public int postRestoreAbsorbFrames = 8;
     [Range(0f, 0.30f)] public float postRestoreAbsorbTime = 0.10f;
 
+    [Header("Preview Piercing (Spark Dash Combat)")]
+    public bool previewPredictPierce = true;
+
+    [Tooltip("Si no hay WorldMaterial, ¿asumimos que se puede piercear igualmente? Recomendado: false.")]
+    public bool previewAssumePierceWhenUnknown = false;
+
+    [Tooltip("Separación mínima para 'salir' del collider tras piercear, solo para la SIMULACIÓN de la línea.")]
+    [Range(0.001f, 0.08f)] public float previewPierceSeparation = 0.02f;
+
+
     private int residualAbsorbFramesLeft = 0;
     private float residualAbsorbUntilTime = -1f;
 
@@ -447,8 +457,14 @@ public class PlayerSparkBoost : MonoBehaviour
 
         baseGravity = rb.gravityScale;
         baseConstraints = rb.constraints;
+
+        // FORCE: el player jamás debe rotar por física.
+        baseConstraints |= RigidbodyConstraints2D.FreezeRotation;
+        rb.constraints = baseConstraints;
+
         baseInterp = rb.interpolation;
         baseBodyType = rb.bodyType;
+
 
         ConfigurePreviewAuto();
         ConfigureRingAuto();
@@ -605,6 +621,9 @@ public class PlayerSparkBoost : MonoBehaviour
             rb.angularVelocity = 0f;
 
             rb.position = sparkAnchorPos;
+            rb.rotation = 0f;
+            rb.angularVelocity = 0f;
+
         }
     }
 
@@ -805,6 +824,7 @@ public class PlayerSparkBoost : MonoBehaviour
             rb.angularVelocity = 0f;
             rb.position = sparkAnchorPos;
 
+
             if (forceOwnRigidbodyState)
                 EnsureRigidbodyAnchoredState();
 
@@ -906,7 +926,10 @@ public class PlayerSparkBoost : MonoBehaviour
         rb.bodyType = RigidbodyType2D.Kinematic;
         rb.gravityScale = 0f;
         rb.interpolation = RigidbodyInterpolation2D.Interpolate;
-        rb.constraints = RigidbodyConstraints2D.None;
+
+        // CLAVE: nunca permitir rotación
+        rb.constraints = RigidbodyConstraints2D.FreezeRotation;
+
 
         move.movementLocked = true;
         rb.linearVelocity = Vector2.zero;
@@ -1142,7 +1165,7 @@ remaining -= nudged;
 
         if (dashBackedConstraints)
         {
-            rb.constraints = dashPrevConstraints;
+            rb.constraints = dashPrevConstraints | RigidbodyConstraints2D.FreezeRotation;
             dashBackedConstraints = false;
         }
 
@@ -1182,7 +1205,7 @@ remaining -= nudged;
 
         if (dashBackedConstraints)
         {
-            rb.constraints = dashPrevConstraints;
+            rb.constraints = dashPrevConstraints | RigidbodyConstraints2D.FreezeRotation;
             dashBackedConstraints = false;
         }
 
@@ -1510,6 +1533,10 @@ remaining -= nudged;
         var centerPts = new List<Vector2>(previewSegments + 16) { simPos };
         var dirPts = new List<Vector2>(previewSegments + 16) { simDir };
 
+        // PREVIEW: colliders que la preview “piercea” para no re-colisionar en la simulación
+        var previewPierced = new HashSet<Collider2D>(64);
+
+
         float dt = Mathf.Max(0.0005f, Time.fixedDeltaTime);
 
         int safetyTicks = 0;
@@ -1552,7 +1579,7 @@ remaining -= nudged;
                     }
                 }
 
-                if (!CastWallsFrom(simPos, simDir, remaining + dashSkin, out RaycastHit2D hit))
+                if (!CastWallsFrom(simPos, simDir, remaining + dashSkin, previewPierced, out RaycastHit2D hit))
                 {
                     simPos += simDir * remaining;
                     remaining = 0f;
@@ -1563,6 +1590,27 @@ remaining -= nudged;
                 }
 
                 float travel = Mathf.Max(0f, hit.distance - dashSkin);
+
+                // ===== PREVIEW PIERCE (PRIORITARIO, incluso si travel==0 / pegado) =====
+                if (hit.collider != null && PredictPiercePreview(hit.collider, dashCombatDamage))
+                {
+                    AddPiercedFamilyToSet(hit.collider, previewPierced);
+
+                    // Empuja lo suficiente para salir de zona “pegada” (evita rebote fantasma por travel~0)
+                    float sep = Mathf.Max(previewPierceSeparation, dashSkin * 2f, 0.005f);
+                    float pushed = Mathf.Min(sep, remaining);
+
+                    simPos += simDir * pushed;
+                    remaining -= pushed;
+
+                    centerPts.Add(simPos);
+                    dirPts.Add(simDir);
+
+                    // seguimos recto, NO reflect, NO rebote
+                    continue;
+                }
+// ======================================================================
+
 
                 if (travel <= 0.0001f)
                 {
@@ -1588,12 +1636,50 @@ remaining -= nudged;
                     continue;
                 }
 
+                // ===== PREVIEW PIERCE cuando estamos pegados =====
+                if (hit.collider != null && PredictPiercePreview(hit.collider, dashCombatDamage))
+                {
+                    previewPierced.Add(hit.collider);
+
+                    float sep = Mathf.Max(0.0025f, previewPierceSeparation);
+                    float pushed = Mathf.Min(sep, remaining);
+                    simPos += simDir * pushed;
+                    remaining -= pushed;
+
+                    centerPts.Add(simPos);
+                    dirPts.Add(simDir);
+
+                    // seguimos recto, NO rebote
+                    continue;
+                }
+                // ===============================================
+
+
                 float movedToHit = Mathf.Min(travel, remaining);
                 simPos += simDir * movedToHit;
                 remaining -= movedToHit;
 
                 centerPts.Add(simPos);
                 dirPts.Add(simDir);
+
+                // ===== PREVIEW PIERCE en impacto normal =====
+                if (hit.collider != null && PredictPiercePreview(hit.collider, dashCombatDamage))
+                {
+                    previewPierced.Add(hit.collider);
+
+                    float sep = Mathf.Max(0.0025f, previewPierceSeparation);
+                    float pushed = Mathf.Min(sep, remaining);
+                    simPos += simDir * pushed;
+                    remaining -= pushed;
+
+                    centerPts.Add(simPos);
+                    dirPts.Add(simDir);
+
+                    // seguimos recto, NO reflect, NO sumamos rebote
+                    continue;
+                }
+                // ============================================
+
 
                 if (remaining <= 0f) break;
 
@@ -1670,6 +1756,42 @@ remaining -= nudged;
         sparkPreviewLine.endColor = c;
         if (sparkPreviewLine.material != null) sparkPreviewLine.material.color = c;
     }
+
+
+    private void AddPiercedFamilyToSet(Collider2D hitCol, HashSet<Collider2D> set)
+    {
+        if (hitCol == null || set == null) return;
+
+        // 1) Siempre el collider directo
+        set.Add(hitCol);
+
+        // 2) Si hay un receiver de pierce en parent, ignora TODOS sus colliders
+        var pierceRoot = hitCol.GetComponentInParent<IPiercingBounceReceiver>() as Component;
+        if (pierceRoot != null)
+        {
+            var cols = pierceRoot.GetComponentsInChildren<Collider2D>(true);
+            for (int i = 0; i < cols.Length; i++)
+                if (cols[i] != null) set.Add(cols[i]);
+
+            return;
+        }
+
+        // 3) Fallback: mismo rigidbody / mismo transform root
+        var rb2d = hitCol.attachedRigidbody;
+        if (rb2d != null)
+        {
+            var cols = rb2d.GetComponentsInChildren<Collider2D>(true);
+            for (int i = 0; i < cols.Length; i++)
+                if (cols[i] != null) set.Add(cols[i]);
+        }
+        else
+        {
+            var cols = hitCol.transform.root.GetComponentsInChildren<Collider2D>(true);
+            for (int i = 0; i < cols.Length; i++)
+                if (cols[i] != null) set.Add(cols[i]);
+        }
+    }
+
 
     // =========================
     // RING
@@ -1752,7 +1874,14 @@ remaining -= nudged;
     // =========================
     // Wall cast FROM SIMULATED POSITION (CON ESCALA REAL)
     // =========================
+    // Wrapper: mantiene llamadas existentes (dash real usa piercedThisDash)
     private bool CastWallsFrom(Vector2 originPos, Vector2 dir, float dist, out RaycastHit2D bestHit)
+    {
+        return CastWallsFrom(originPos, dir, dist, piercedThisDash, out bestHit);
+    }
+
+    // Overload: permite pasar un ignoreSet distinto (preview usará su propio set)
+    private bool CastWallsFrom(Vector2 originPos, Vector2 dir, float dist, HashSet<Collider2D> ignoreSet, out RaycastHit2D bestHit)
     {
         bestHit = default;
 
@@ -1802,8 +1931,8 @@ remaining -= nudged;
             if (h.collider.isTrigger) continue;
             if (h.collider == playerCol) continue;
 
-            if (piercedThisDash.Contains(h.collider)) continue;  // <-- CLAVE: no re-colisionar con lo ya pierceado
-
+            // CLAVE: ignora lo que el set diga (dash real o preview)
+            if (ignoreSet != null && ignoreSet.Contains(h.collider)) continue;
 
             if (h.distance < best)
             {
@@ -1815,6 +1944,42 @@ remaining -= nudged;
 
         return has;
     }
+
+
+
+    private bool PredictPiercePreview(Collider2D col, int damage)
+    {
+        if (!dashUsesBounceCombat) return false;
+        if (!previewPredictPierce) return false;
+        if (col == null) return false;
+
+        // 1) Si en runtime es "pierce receiver", la preview DEBE asumir pierce (si no, te miente).
+        var pierceReceiver = col.GetComponentInParent<IPiercingBounceReceiver>();
+        if (pierceReceiver != null)
+        {
+            // Si además hay WorldMaterial, puedes refinar:
+            var wmR = col.GetComponentInParent<WorldMaterial>();
+            if (wmR != null)
+            {
+                if (wmR.indestructible) return false;
+                return wmR.structuralHP <= (damage + 0.0001f);
+            }
+
+            // No hay WM: en runtime igual piercea => preview no debe inventarse rebotes.
+            return true;
+        }
+
+        // 2) Si NO hay pierce receiver, entonces usa WorldMaterial como antes
+        var wm = col.GetComponentInParent<WorldMaterial>();
+        if (wm != null)
+        {
+            if (wm.indestructible) return false;
+            return wm.structuralHP <= (damage + 0.0001f);
+        }
+
+        return previewAssumePierceWhenUnknown;
+    }
+
 
     // =========================
     // RB state
@@ -1841,17 +2006,24 @@ remaining -= nudged;
         {
             rb.gravityScale = prevGravity;
             rb.interpolation = prevInterp;
-            rb.constraints = prevConstraints;
+
+            // BLINDA: aunque el estado anterior viniera sin FreezeRotation, lo fuerzas.
+            rb.constraints = prevConstraints | RigidbodyConstraints2D.FreezeRotation;
+
             rbStateBackedUp = false;
         }
 
         rb.bodyType = baseBodyType;
         rb.gravityScale = baseGravity;
         rb.interpolation = baseInterp;
-        rb.constraints = baseConstraints;
+
+        // BLINDA: baseConstraints ya lo OR-eas en Awake, pero aquí garantizas cualquier caso raro.
+        rb.constraints = baseConstraints | RigidbodyConstraints2D.FreezeRotation;
 
         rb.angularVelocity = 0f;
+        rb.rotation = 0f; // CLAVE: si se inclinó 1 frame, lo reseteas aquí.
     }
+
 
     // =========================
     // DEBUG - Dash Trail (ephemeral TrailRenderer)
