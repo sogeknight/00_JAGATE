@@ -85,6 +85,46 @@ public class PlayerBounceAttack : MonoBehaviour
     [Min(2)] public int previewSegments = 30;
     [Min(0)] public int previewMaxBounces = 5;
 
+
+
+    [Header("Preview: Pickup magnet (solo visual)")]
+    public bool previewMagnetizePickups = true;
+
+    // IMPORTANTE: pon aquí la layer donde están tus FlameSparkPickup (o un LayerMask específico)
+    public LayerMask pickupLayers;
+
+
+    [Header("Aim Assist: Auto-target pickup cercano (mantiene 8 dirs)")]
+    public bool aimAssistPickups = true;
+
+    [Tooltip("Radio en el que el aim se auto-redondea hacia un pickup cercano (solo durante AIM).")]
+    public float aimAssistPickupRadius = 1.25f;
+
+
+    [Tooltip("Radio en el que la preview 'engancha' un pickup cercano.")]
+    [Range(0.02f, 1.0f)] public float pickupMagnetRadius = 0.35f;
+
+    [Tooltip("Cuánta curvatura/atracción aplica (0=off, 1=engancha total).")]
+    [Range(0f, 1f)] public float pickupMagnetStrength = 1.0f;
+
+    [Tooltip("Cuántos puntos finales se curvan hacia el pickup (más = más redondo).")]
+    [Range(2, 8)] public int pickupMagnetTailPoints = 4;
+
+    // Marcador visual (círculo) como el Spark
+    public bool previewShowPickupCircle = true;
+
+    // Estado persistente de "la preview va a coger un pickup"
+    private bool previewHitPickup = false;
+    private Vector2 previewPickupAnchor = default;
+
+    public LineRenderer pickupPreviewCircle;
+    public float pickupCircleRadius = 0.35f;
+    public int pickupCircleSegments = 32;
+    public float pickupCircleWidth = 0.06f;
+    public string pickupCircleSortingLayer = "Default";
+    public int pickupCircleSortingOrder = 10050;
+
+
     [Header("Aim Snapping (solo + y X)")]
     public bool snapAimTo8Dirs = true;
 
@@ -96,6 +136,12 @@ public class PlayerBounceAttack : MonoBehaviour
 
     [Header("Preview: visual")]
     public Color previewColor = Color.cyan;
+
+    [Header("Pickup: Debug Circle")]
+    public bool pickupCircleUseRealCatchRadius = true;
+    [Range(0.1f, 2.0f)] public float pickupCircleRadiusMultiplier = 1.0f;
+    public float pickupCircleRadiusOverride = 0.35f; // si no usas real
+
 
     [Header("Rebote: corrección de normal (anti diagonales raras)")]
     [Range(0.5f, 0.99f)]
@@ -114,6 +160,26 @@ public class PlayerBounceAttack : MonoBehaviour
     public float pierceSeparationRadiusFactor = 0.7f;
     public float pierceSeparationMax = 0.25f;
 
+
+    [Header("Debug: Pickup Magnet")]
+    public bool debugPickupMagnet = true;
+    [Range(1, 60)] public int debugPickupEveryNFrames = 6;
+    public bool debugPickupDraw = true;
+
+    private int _dbgPickupFrame;
+    private int _dbgBestProbeIndex = -1;
+    private float _dbgBestDistFromStart = 0f;
+    private Vector2 _dbgBestProbePoint;
+    private Vector2 _dbgBestProbePrevPoint;
+    private string _dbgBestPickupName = "";
+    private int _dbgBestOverlapCount = 0;
+    private bool _dbgMagnetReturnedTrue = false;
+
+
+    private float _pickupCastRadius = 0f;
+
+
+
     private Rigidbody2D rb;
     private PlayerMovementController movement;
     private CircleCollider2D circle;
@@ -122,6 +188,10 @@ public class PlayerBounceAttack : MonoBehaviour
 
     private bool isAiming = false;
     private bool isBouncing = false;
+
+    // Auto-aim por defecto (solo si NO hay input del jugador)
+    private bool usingDefaultPickupAim = false;
+
 
     private Vector2 lastAimDir = Vector2.right; // dirección “bloqueada” (8 dirs)
     private float remainingDistance = 0f;
@@ -155,12 +225,20 @@ public class PlayerBounceAttack : MonoBehaviour
         if (phys == null) Debug.LogError("[PlayerBounceAttack] Falta PlayerPhysicsStateController en el Player.");
 
         ballRadius = circle.radius * Mathf.Max(transform.lossyScale.x, transform.lossyScale.y);
+        _pickupCastRadius = ComputePickupCastRadiusFromAllPlayerColliders();
+
         fixedStepSize = maxDistance / Mathf.Max(1, previewSegments);
 
         ConfigurePreview();
 
         CacheLayerIds(enemyLayers, enemyLayerIds);
         CacheLayerIds(hazardLayers, hazardLayerIds);
+
+        _pickupFilter = new ContactFilter2D();
+        _pickupFilter.useLayerMask = true;
+        _pickupFilter.layerMask = pickupLayers;
+        _pickupFilter.useTriggers = true;   // CLAVE: SIEMPRE incluir triggers
+        _pickupFilter.useDepth = false;
     }
 
     private void CacheLayerIds(LayerMask mask, List<int> outList)
@@ -312,6 +390,46 @@ public class PlayerBounceAttack : MonoBehaviour
         if (remainingDistance <= 0f)
             EndBounce();
     }
+
+
+    private float ComputePickupCastRadiusFromAllPlayerColliders()
+    {
+        // Queremos un radio que represente “lo primero que puede tocar el trigger” en runtime.
+        // Si el Player tiene BoxCollider2D + CircleCollider2D, el Box puede tocar antes.
+        // Aproximamos usando el círculo que envuelve los bounds de cada collider.
+
+        float best = 0f;
+        var cols = GetComponents<Collider2D>();
+        if (cols == null || cols.Length == 0) return ballRadius;
+
+        for (int i = 0; i < cols.Length; i++)
+        {
+            var col = cols[i];
+            if (!col || !col.enabled) continue;
+
+            // Ignora triggers si quieres que el cuerpo “real” sea el que recoge.
+            // Si tu Player tiene triggers propios, no deben influir.
+            if (col.isTrigger) continue;
+
+            if (col is CircleCollider2D cc)
+            {
+                float s = Mathf.Max(cc.transform.lossyScale.x, cc.transform.lossyScale.y);
+                best = Mathf.Max(best, Mathf.Abs(cc.radius * s));
+            }
+            else
+            {
+                // Radio del círculo que envuelve el rectángulo de bounds (aprox.)
+                var e = col.bounds.extents; // en mundo
+                float r = Mathf.Sqrt(e.x * e.x + e.y * e.y);
+                best = Mathf.Max(best, r);
+            }
+        }
+
+        // Fallback seguro
+        if (best <= 0.0001f) best = ballRadius;
+        return best;
+    }
+
 
     // ======================================================================
     // SIMULACIÓN UNIFICADA (REAL + PREVIEW)
@@ -706,26 +824,57 @@ public class PlayerBounceAttack : MonoBehaviour
         float x = Input.GetAxisRaw("Horizontal");
         float y = Input.GetAxisRaw("Vertical");
 
-        Vector2 input = new Vector2(x, y);
+        Vector2 raw = new Vector2(x, y);
 
-        // Deadzone real
-        if (input.sqrMagnitude < (aimInputDeadzone * aimInputDeadzone))
+        bool hasUserInput =
+            Mathf.Abs(x) >= aimInputDeadzone ||
+            Mathf.Abs(y) >= aimInputDeadzone;
+
+
+        Vector2 dir;
+
+        if (hasUserInput)
         {
-            // mantener
-            input = lastAimDir;
+            // 1) El jugador manda (modo normal 8 dirs)
+            usingDefaultPickupAim = false;
+
+            dir = raw.normalized;
+            if (snapAimTo8Dirs) dir = Quantize8Dirs(dir);
+            lastAimDir = dir;
         }
         else
         {
-            input.Normalize();
+            // 2) Sin input: por defecto -> pickup más cercano (dirección libre) si es alcanzable
+            float reach = (previewDistance > 0.01f) ? previewDistance : maxDistance;
+
+            if (aimAssistPickups && pickupLayers.value != 0 &&
+                TryGetNearestPickupAnchor(rb.position, reach, out Vector2 a))
+            {
+                Vector2 to = a - rb.position;
+
+                if (to.sqrMagnitude > 0.0001f && to.magnitude <= reach + 0.0001f)
+                {
+                    // CLAVE: dirección LIBRE al pickup (NO 8 dirs)
+                    usingDefaultPickupAim = true;
+                    lastAimDir = to.normalized;
+                }
+                else
+                {
+                    usingDefaultPickupAim = false;
+                    lastAimDir = Vector2.right;
+                }
+            }
+            else
+            {
+                usingDefaultPickupAim = false;
+                lastAimDir = Vector2.right;
+            }
         }
 
-        if (snapAimTo8Dirs)
-            input = Quantize8Dirs(input);
-
-        lastAimDir = (input.sqrMagnitude > 0.0001f) ? input : Vector2.right;
-
         UpdatePreview();
+
     }
+
 
     private void StartBounce()
     {
@@ -908,15 +1057,532 @@ public class PlayerBounceAttack : MonoBehaviour
             Vector2 end = pos + dir * remaining;
             points.Add(end);
         }
+        
+        // Resample fijo para que la línea NO cambie de “larga/corta”
+        // ---- PICKUP MAGNET (solo visual) ----
+        EnsurePickupCircle();
 
-        // Resample fijo para que la línea NO cambie de “larga/corta” por la cantidad de puntos
+        
+
+        // Longitud efectiva (si no hay pickup, es previewLen; si hay, se recorta)
+        float effectivePreviewLen = previewLen;
+
+        // PROBE denso para evitar fallos “entre puntos”
         int targetCount = Mathf.Max(2, previewSegments + 1);
-        var sampled = ResamplePolylineFixedCount(points, targetCount, previewLen);
+        int probeCount = Mathf.Max(targetCount, 24);
+        var probe = ResamplePolylineFixedCount_Probe(points, probeCount, previewLen);
+
+        if (TryFindFirstPickupContactCenterAlongPolyline(
+                probe,
+                out Vector2 pickupAnchor,
+                out Vector2 pickupCenter,
+                out float catchR,
+                out Color pickupColor))
+        {
+            previewHitPickup = true;
+            previewPickupAnchor = pickupAnchor;
+
+            TrimPolylineToAnchor(probe, pickupAnchor);
+
+            SetPickupCircleVisible(true);
+
+            // CÍRCULO REAL: centrado en pickup, radio real de captura
+            float drawR = pickupCircleUseRealCatchRadius
+                ? (catchR * pickupCircleRadiusMultiplier)
+                : pickupCircleRadiusOverride;
+
+            DrawPickupCircle(pickupCenter, drawR, pickupColor);
+
+
+            // (Opcional) marca el punto real donde el centro del player tocaría
+            if (debugPickupDraw)
+            {
+                Debug.DrawLine(pickupAnchor + Vector2.left * 0.12f, pickupAnchor + Vector2.right * 0.12f, Color.red, 0f, false);
+                Debug.DrawLine(pickupAnchor + Vector2.down * 0.12f, pickupAnchor + Vector2.up * 0.12f, Color.red, 0f, false);
+            }
+
+            var sampledPickup = ResamplePolylineFixedCount(probe, targetCount, PolylineLength(probe));
+            sampledPickup[sampledPickup.Count - 1] = pickupAnchor;
+
+            previewLine.positionCount = sampledPickup.Count;
+            previewLine.SetPositions(sampledPickup.ToArray());
+            previewLine.enabled = true;
+            return;
+        }
+
+        else
+        {
+            previewHitPickup = false;
+            previewPickupAnchor = default;
+            SetPickupCircleVisible(false);
+        }
+
+
+
+        _dbgMagnetReturnedTrue = false;
+        _dbgBestProbeIndex = -1;
+        _dbgBestPickupName = "";
+        _dbgBestOverlapCount = 0;
+
+        if (debugPickupDraw && probe != null && probe.Count >= 2)
+        {
+            // Dibuja la probe (amarillo) para ver si pasa por el pickup o no.
+            for (int i = 1; i < probe.Count; i++)
+                Debug.DrawLine(probe[i - 1], probe[i], Color.yellow, 0f, false);
+        }
+
+
+
+        // Resample final usando longitud efectiva
+        var sampled = ResamplePolylineFixedCount(points, targetCount, effectivePreviewLen);
 
         previewLine.positionCount = sampled.Count;
         previewLine.SetPositions(sampled.ToArray());
         previewLine.enabled = true;
+
+
     }
+
+
+
+    private bool TryMagnetizePreviewToPickup(List<Vector3> points, out Vector2 anchor, out Color circleColor)
+    {
+        anchor = default;
+        circleColor = (previewLine != null) ? previewLine.startColor : previewColor;
+
+        previewHitPickup = false;
+        previewPickupAnchor = default;
+
+        bool doLog = debugPickupMagnet && (++_dbgPickupFrame % Mathf.Max(1, debugPickupEveryNFrames) == 0);
+        if (doLog)
+        {
+            Debug.Log($"[PREVIEW MAGNET] start | points={points?.Count ?? 0} | radius={pickupMagnetRadius:F3} | layers={pickupLayers.value}");
+        }
+
+
+        if (!previewMagnetizePickups) return false;
+        if (points == null || points.Count < 2) return false;
+        if (pickupLayers.value == 0) return false;
+
+        // Muestreo determinista: buscamos el primer punto de la polilínea
+        // que entra dentro del radio del imán de algún pickup.
+        float bestDistFromStart = float.PositiveInfinity;
+        FlameSparkPickup bestPickup = null;
+
+        float accDist = 0f;
+
+        // Nota: points aquí es tu "probe" ya resampleada => spacing bastante uniforme.
+        for (int i = 0; i < points.Count; i++)
+        {
+            Vector2 p = points[i];
+
+            
+
+            // Overlap en radio del imán (incluye triggers si Physics2D.queriesHitTriggers = true, que normalmente lo está)
+            _pickupFilter.layerMask = pickupLayers; // por si cambias layers en runtime
+            // radio real de captura = radio del player + radio del trigger del pickup (+ un margen)
+            float probePickupR = 0.15f;
+            float probeCatchRadius = ballRadius + probePickupR + Mathf.Max(0.01f, skin);
+
+            int n = Physics2D.OverlapCircle(p, probeCatchRadius, _pickupFilter, _pickupHits);
+
+
+
+            if (doLog && n > 0)
+            {
+                Debug.Log($"[PREVIEW MAGNET] probe i={i} | overlap n={n} | p=({p.x:F3},{p.y:F3}) | accDist={accDist:F3}");
+            }
+
+
+            if (n > 0)
+            {
+                // Si hay varios, nos quedamos con el más cercano al punto p (por estabilidad)
+                FlameSparkPickup bestHere = null;
+                float bestHereSqr = float.PositiveInfinity;
+
+                for (int k = 0; k < n; k++)
+                {
+                    var col = _pickupHits[k];
+                    if (!col || !col.enabled) continue;
+
+                    var hitPickup = col.GetComponentInParent<FlameSparkPickup>();
+                    if (!hitPickup) continue;
+
+                    Vector2 a = hitPickup.GetAnchorWorld();
+
+                    float sqr = (a - p).sqrMagnitude;
+
+                    if (sqr < bestHereSqr)
+                    {
+                        bestHereSqr = sqr;
+                        bestHere = hitPickup;
+
+                    }
+                }
+
+                if (doLog && n > 0)
+                {
+                    Debug.Log($"[PREVIEW MAGNET]  bestHere={(bestHere ? bestHere.name : "NULL")} | bestHereSqr={bestHereSqr:F6}");
+                }
+
+
+                if (bestHere != null)
+                {
+                    // Distancia recorrida aproximada hasta este punto de la polilínea
+                    float distFromStart = accDist;
+
+                    if (distFromStart < bestDistFromStart)
+                    {
+                        bestDistFromStart = distFromStart;
+                        bestPickup = bestHere;
+
+                        _dbgBestProbeIndex = i;
+                        _dbgBestDistFromStart = distFromStart;
+                        _dbgBestProbePoint = p;
+                        Vector2 prev = (i > 0) ? (Vector2)points[i - 1] : p;
+                        _dbgBestProbePrevPoint = prev;
+
+                        _dbgBestPickupName = bestHere.name;
+                        _dbgBestOverlapCount = n;
+
+                        if (doLog)
+                            Debug.Log($"[PREVIEW MAGNET]  SELECT bestPickup={_dbgBestPickupName} at i={_dbgBestProbeIndex} dist={_dbgBestDistFromStart:F3}");
+                    }
+
+                }
+            }
+
+            // acumula longitud hasta el siguiente punto
+            if (i < points.Count - 1)
+                accDist += Vector2.Distance(points[i], points[i + 1]);
+        }
+
+        if (bestPickup == null)
+        {
+            if (doLog)
+                Debug.Log("[PREVIEW MAGNET] RESULT = FALSE (no pickup found along probe)");
+            return false;
+        }
+
+
+        if (bestPickup == null) return false;
+
+        // 🔴 CLAVE: NO usar el anchor interno del pickup
+        // usamos el punto REAL de contacto contra el collider
+
+        Vector2 center = bestPickup.GetAnchorWorld();
+
+        // Radio de captura REAL (player + trigger)
+        float pickupR = GetPickupTriggerRadiusWorld(bestPickup);
+        float catchRadius = ballRadius + pickupR + Mathf.Max(0.01f, skin);
+
+        // Anchor = primera intersección del segmento con el círculo de captura
+        if (!TrySegmentCircleFirstIntersection(_dbgBestProbePrevPoint, _dbgBestProbePoint, center, catchRadius, out anchor))
+        {
+            // Si por lo que sea no hay intersección numérica, caemos al punto de probe
+            anchor = _dbgBestProbePoint;
+        }
+
+
+
+        previewHitPickup = true;
+        previewPickupAnchor = anchor;
+
+        if (debugPickupDraw)
+        {
+            // contacto real (ROJO)
+            Debug.DrawLine(anchor + Vector2.left * 0.15f, anchor + Vector2.right * 0.15f, Color.red, 0f);
+            Debug.DrawLine(anchor + Vector2.down * 0.15f, anchor + Vector2.up * 0.15f, Color.red, 0f);
+
+            // anchor original (AZUL)
+            Debug.DrawLine(center, anchor, Color.blue, 0f);
+
+        }
+
+
+
+        _dbgMagnetReturnedTrue = true;
+
+        if (doLog)
+        {
+            float d = Vector2.Distance(_dbgBestProbePoint, anchor);
+            Debug.Log($"[PREVIEW MAGNET] RESULT = TRUE | pickup={bestPickup.name} | anchor=({anchor.x:F3},{anchor.y:F3}) | bestProbePointDistToAnchor={d:F3} | bestIndex={_dbgBestProbeIndex}");
+        }
+
+        if (debugPickupDraw)
+        {
+            // Marca el punto de probe donde “enganchó”
+            Debug.DrawLine(_dbgBestProbePoint + Vector2.left * 0.08f, _dbgBestProbePoint + Vector2.right * 0.08f, Color.magenta, 0f, false);
+            Debug.DrawLine(_dbgBestProbePoint + Vector2.down * 0.08f, _dbgBestProbePoint + Vector2.up * 0.08f, Color.magenta, 0f, false);
+
+            // Marca el anchor
+            Debug.DrawLine(anchor + Vector2.left * 0.12f, anchor + Vector2.right * 0.12f, Color.green, 0f, false);
+            Debug.DrawLine(anchor + Vector2.down * 0.12f, anchor + Vector2.up * 0.12f, Color.green, 0f, false);
+
+            // Línea entre ambos
+            Debug.DrawLine(_dbgBestProbePoint, anchor, Color.green, 0f, false);
+        }
+
+        return true;
+
+    }
+
+
+
+
+
+    private bool TryFindFirstPickupContactCenterAlongPolyline(
+        List<Vector3> poly,
+        out Vector2 playerCenterAtContact,
+        out Vector2 pickupCenter,
+        out float catchRadius,
+        out Color circleColor)
+    {
+        playerCenterAtContact = default;
+        pickupCenter = default;
+        catchRadius = 0f;
+        circleColor = (previewLine != null) ? previewLine.startColor : previewColor;
+
+        if (!previewMagnetizePickups) return false;
+        if (poly == null || poly.Count < 2) return false;
+        if (pickupLayers.value == 0) return false;
+
+        _pickupFilter.useLayerMask = true;
+        _pickupFilter.layerMask = pickupLayers;
+        _pickupFilter.useTriggers = true;
+        _pickupFilter.useDepth = false;
+
+        float bestDistFromStart = float.PositiveInfinity;
+
+        float acc = 0f;
+
+        for (int i = 0; i < poly.Count - 1; i++)
+        {
+            Vector2 a = poly[i];
+            Vector2 b = poly[i + 1];
+            Vector2 ab = b - a;
+
+            float segLen = ab.magnitude;
+            if (segLen < 1e-5f) continue;
+
+            Vector2 dir = ab / segLen;
+
+            int hitCount = Physics2D.CircleCast(a, _pickupCastRadius, dir, _pickupFilter, _pickupCastHits, segLen);
+
+            if (hitCount > 0)
+            {
+                for (int h = 0; h < hitCount; h++)
+                {
+                    var hit = _pickupCastHits[h];
+                    if (!hit.collider) continue;
+
+                    var p = hit.collider.GetComponentInParent<FlameSparkPickup>();
+                    if (!p) continue;
+
+                    float distFromStart = acc + hit.distance;
+                    if (distFromStart < bestDistFromStart)
+                    {
+                        bestDistFromStart = distFromStart;
+
+                        // Centro del player cuando toca (esto es lo que debes recortar en la polyline)
+                        playerCenterAtContact = a + dir * hit.distance;
+
+                        // Centro del pickup (para dibujar círculo real de captura)
+                        pickupCenter = p.GetAnchorWorld();
+
+                        // Radio real de captura (player "cast radius" + radio trigger pickup)
+                        float pickupR = GetPickupTriggerRadiusWorld(p);
+                        catchRadius = _pickupCastRadius + pickupR + Mathf.Max(0.01f, skin);
+
+                        // Debug reutilizando tus campos
+                        _dbgBestProbeIndex = i;
+                        _dbgBestDistFromStart = distFromStart;
+                        _dbgBestProbePoint = playerCenterAtContact;
+                        _dbgBestProbePrevPoint = a;
+                        _dbgBestPickupName = p.name;
+                    }
+                }
+            }
+
+            acc += segLen;
+        }
+
+        if (bestDistFromStart == float.PositiveInfinity) return false;
+
+        previewHitPickup = true;
+        previewPickupAnchor = playerCenterAtContact;
+        return true;
+    }
+
+
+
+
+
+    private static bool TrySegmentCircleFirstIntersection(
+        Vector2 a, Vector2 b,
+        Vector2 center, float radius,
+        out Vector2 hit)
+    {
+        hit = default;
+
+        Vector2 d = b - a;
+        Vector2 f = a - center;
+
+        float r = Mathf.Max(0.0001f, radius);
+
+        float A = Vector2.Dot(d, d);
+        if (A < 1e-8f) return false;
+
+        float B = 2f * Vector2.Dot(f, d);
+        float C = Vector2.Dot(f, f) - r * r;
+
+        float disc = B * B - 4f * A * C;
+        if (disc < 0f) return false;
+
+        float sqrt = Mathf.Sqrt(disc);
+
+        // dos soluciones paramétricas en la recta
+        float t1 = (-B - sqrt) / (2f * A);
+        float t2 = (-B + sqrt) / (2f * A);
+
+        // buscamos la primera intersección dentro del segmento [0..1]
+        float t = float.PositiveInfinity;
+
+        if (t1 >= 0f && t1 <= 1f) t = t1;
+        if (t2 >= 0f && t2 <= 1f) t = Mathf.Min(t, t2);
+
+        if (!float.IsFinite(t) || t == float.PositiveInfinity) return false;
+
+        hit = a + d * t;
+        return true;
+    }
+
+
+    private float GetPickupCatchRadius(FlameSparkPickup pickup)
+    {
+        if (!pickup) return ballRadius;
+
+        Collider2D col = pickup.GetComponentInChildren<Collider2D>();
+        if (!col) col = pickup.GetComponentInParent<Collider2D>();
+
+        if (col is CircleCollider2D cc)
+        {
+            float s = Mathf.Max(cc.transform.lossyScale.x, cc.transform.lossyScale.y);
+            return ballRadius + cc.radius * s;
+        }
+
+        // fallback: bounds
+        return ballRadius + Mathf.Max(col.bounds.extents.x, col.bounds.extents.y);
+    }
+
+
+
+    private float GetPickupTriggerRadiusWorld(FlameSparkPickup pickup)
+    {
+        if (pickup == null) return 0.15f;
+
+        // Intentamos estimar el “radio” del trigger del pickup en mundo.
+        // Esto funciona para CircleCollider2D y también “aproxima” para otros.
+        var c = pickup.GetComponentInChildren<Collider2D>();
+        if (!c) c = pickup.GetComponentInParent<Collider2D>();
+        if (!c) return 0.15f;
+
+        if (c is CircleCollider2D cc)
+        {
+            // radio en mundo (escala)
+            float s = Mathf.Max(cc.transform.lossyScale.x, cc.transform.lossyScale.y);
+            return Mathf.Abs(cc.radius * s);
+        }
+
+        // Aproximación: usamos el mayor semieje de bounds (en mundo)
+        var b = c.bounds;
+        return Mathf.Max(b.extents.x, b.extents.y);
+    }
+
+    private bool ValidatePickupAtAnchor(Vector2 anchor, FlameSparkPickup expected)
+    {
+        // validación final: en el anchor, realmente estamos dentro del "radio de captura".
+        _pickupFilter.layerMask = pickupLayers;
+
+        int n = Physics2D.OverlapCircle(anchor, 0.001f, _pickupFilter, _pickupHits);
+        if (n <= 0) return false;
+
+        for (int i = 0; i < n; i++)
+        {
+            var hitCol = _pickupHits[i];
+            if (!hitCol || !hitCol.enabled) continue;
+
+            var hitPickup = hitCol.GetComponentInParent<FlameSparkPickup>();
+            if (hitPickup == expected) return true;
+        }
+
+        return false;
+    }
+
+
+
+
+
+
+
+    private bool TryGetNearestPickupAnchor(Vector2 center, float radius, out Vector2 anchor)
+    {
+        anchor = default;
+        if (pickupLayers.value == 0) return false;
+
+        float bestSqr = float.PositiveInfinity;
+        FlameSparkPickup best = null;
+
+        int n = Physics2D.OverlapCircleNonAlloc(center, radius, _pickupHits, pickupLayers);
+        for (int i = 0; i < n; i++)
+        {
+            var col = _pickupHits[i];
+            if (!col || !col.enabled) continue;
+
+            var p = col.GetComponentInParent<FlameSparkPickup>();
+            if (!p) continue;
+
+            Vector2 a = p.GetAnchorWorld();
+            float sqr = (a - center).sqrMagnitude;
+
+            if (sqr < bestSqr)
+            {
+                bestSqr = sqr;
+                best = p;
+                anchor = a;
+            }
+        }
+
+        return best != null;
+    }
+
+
+    private void ApplyMagnetCurve(List<Vector3> points, Vector2 anchor)
+    {
+        int tail = Mathf.Clamp(pickupMagnetTailPoints, 2, 8);
+        int start = Mathf.Max(0, points.Count - tail);
+
+        // Fuerza real (permite “semi-imán” sin enganchar del todo)
+        float s = Mathf.Clamp01(pickupMagnetStrength);
+
+        for (int i = start; i < points.Count; i++)
+        {
+            float t = (i - start) / (float)Mathf.Max(1, (points.Count - 1 - start));
+            // ease-in hacia el final: redondea sin “codo”
+            float ease = t * t;
+
+            Vector2 p = points[i];
+            Vector2 target = Vector2.Lerp(p, anchor, s);
+            Vector2 curved = Vector2.Lerp(p, target, ease);
+
+            points[i] = curved;
+        }
+
+        // Asegura que el final cae exactamente en el anchor (si s=1)
+        if (s >= 0.999f)
+            points[points.Count - 1] = anchor;
+    }
+
 
     private List<Vector3> ResamplePolylineFixedCount(List<Vector3> src, int targetCount, float totalLength)
     {
@@ -957,12 +1623,81 @@ public class PlayerBounceAttack : MonoBehaviour
         return outPts;
     }
 
+    private static float PolylineLength(List<Vector3> pts)
+    {
+        if (pts == null || pts.Count < 2) return 0f;
+        float len = 0f;
+        for (int i = 1; i < pts.Count; i++)
+            len += Vector3.Distance(pts[i - 1], pts[i]);
+        return len;
+    }
+
+    private static void TrimPolylineToAnchor(List<Vector3> pts, Vector2 anchor)
+    {
+        if (pts == null || pts.Count < 2) return;
+
+        // Encuentra el segmento (i -> i+1) cuya proyección al anchor sea la más cercana
+        int bestSeg = -1;
+        float bestSqr = float.PositiveInfinity;
+        float bestT = 0f;
+
+        for (int i = 0; i < pts.Count - 1; i++)
+        {
+            Vector2 a = pts[i];
+            Vector2 b = pts[i + 1];
+            Vector2 ab = b - a;
+
+            float abLenSqr = ab.sqrMagnitude;
+            if (abLenSqr < 1e-8f) continue;
+
+            float t = Vector2.Dot(anchor - a, ab) / abLenSqr;
+            t = Mathf.Clamp01(t);
+
+            Vector2 proj = a + ab * t;
+            float sqr = (proj - anchor).sqrMagnitude;
+
+            if (sqr < bestSqr)
+            {
+                bestSqr = sqr;
+                bestSeg = i;
+                bestT = t;
+            }
+        }
+
+        if (bestSeg < 0) return;
+
+        // Recorta todo después del segmento ganador
+        int cutIndex = bestSeg + 1;
+        if (cutIndex < pts.Count - 1)
+            pts.RemoveRange(cutIndex + 1, pts.Count - (cutIndex + 1));
+
+        // Fuerza el último punto EXACTO al anchor
+        pts[pts.Count - 1] = anchor;
+    }
+
+
+    private List<Vector3> ResamplePolylineFixedCount_Probe(List<Vector3> src, int probeCount, float totalLength)
+    {
+        // Simple wrapper para no duplicar lógica mental
+        return ResamplePolylineFixedCount(src, Mathf.Max(2, probeCount), totalLength);
+    }
+
+
     private void ClearPreview()
     {
-        if (previewLine == null) return;
-        previewLine.enabled = false;
-        previewLine.positionCount = 0;
+        if (previewLine != null)
+        {
+            previewLine.enabled = false;
+            previewLine.positionCount = 0;
+        }
+
+        if (pickupPreviewCircle != null)
+        {
+            pickupPreviewCircle.enabled = false;
+            // NO: pickupPreviewCircle.positionCount = 0;
+        }
     }
+
 
     private void ConfigurePreview()
     {
@@ -1052,6 +1787,89 @@ public class PlayerBounceAttack : MonoBehaviour
         // Caso general
         return Quantize8Dirs(Vector2.Reflect(qIn, normal));
     }
+
+
+    private readonly Collider2D[] _pickupHits = new Collider2D[64];
+    private ContactFilter2D _pickupFilter;
+
+    private readonly RaycastHit2D[] _pickupCastHits = new RaycastHit2D[32];
+
+
+
+    private void EnsurePickupCircle()
+    {
+        if (!previewShowPickupCircle) return;
+
+        if (pickupPreviewCircle == null)
+        {
+            // crea un GO hijo para no ensuciar el mismo LR del preview
+            var go = new GameObject("BouncePreview_PickupCircle");
+            go.transform.SetParent(null); // en world space, da igual; si prefieres, SetParent(transform)
+            pickupPreviewCircle = go.AddComponent<LineRenderer>();
+        }
+
+        pickupPreviewCircle.useWorldSpace = true;
+        pickupPreviewCircle.loop = true;
+        pickupPreviewCircle.positionCount = Mathf.Max(8, pickupCircleSegments);
+        pickupPreviewCircle.startWidth = pickupCircleWidth;
+        pickupPreviewCircle.endWidth = pickupCircleWidth;
+
+        var shader = Shader.Find("Unlit/Color") ?? Shader.Find("Sprites/Default");
+        var mat = new Material(shader);
+        mat.color = previewColor; // reusa tu color actual de preview
+        pickupPreviewCircle.material = mat;
+
+        pickupPreviewCircle.startColor = previewColor;
+        pickupPreviewCircle.endColor = previewColor;
+
+        pickupPreviewCircle.sortingLayerName = pickupCircleSortingLayer;
+        pickupPreviewCircle.sortingOrder = pickupCircleSortingOrder;
+
+        pickupPreviewCircle.enabled = false;
+    }
+
+    private void SetPickupCircleVisible(bool on)
+    {
+        if (pickupPreviewCircle == null) return;
+
+        pickupPreviewCircle.enabled = on;
+
+        // NO pongas positionCount=0 al apagarlo: eso lo "mata" y dependes de que
+        // en el mismo frame se vuelva a rellenar. Así es como te falla "a veces".
+        if (on)
+        {
+            int segs = Mathf.Max(8, pickupCircleSegments);
+            if (pickupPreviewCircle.positionCount != segs)
+                pickupPreviewCircle.positionCount = segs;
+        }
+    }
+
+
+
+    private void DrawPickupCircle(Vector2 center, float radius, Color c)
+    {
+        if (pickupPreviewCircle == null) return;
+
+        pickupPreviewCircle.startColor = c;
+        pickupPreviewCircle.endColor = c;
+        if (pickupPreviewCircle.material != null) pickupPreviewCircle.material.color = c;
+
+        int segs = Mathf.Max(8, pickupCircleSegments);
+        if (pickupPreviewCircle.positionCount != segs) pickupPreviewCircle.positionCount = segs;
+
+        float r = Mathf.Max(0.01f, radius);
+        for (int i = 0; i < segs; i++)
+        {
+            float t = i / (float)segs;
+            float a = t * Mathf.PI * 2f;
+            pickupPreviewCircle.SetPosition(i, new Vector3(
+                center.x + Mathf.Cos(a) * r,
+                center.y + Mathf.Sin(a) * r,
+                0f
+            ));
+        }
+    }
+
 
 
 }
