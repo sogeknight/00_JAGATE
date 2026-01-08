@@ -1285,7 +1285,7 @@ remaining -= nudged;
         aimLocked = false;
     }
 
-    private void ForceEndAll()
+    public void ForceEndAll()
     {
         EnableDashTrail(false);
 

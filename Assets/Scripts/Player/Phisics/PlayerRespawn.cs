@@ -1,5 +1,6 @@
 using UnityEngine;
 using UnityEngine.SceneManagement;
+using System.Collections;
 
 [RequireComponent(typeof(Collider2D))]
 public class PlayerRespawn : MonoBehaviour
@@ -20,6 +21,9 @@ public class PlayerRespawn : MonoBehaviour
     public KeyCode newGameKey = KeyCode.F1;     // fuerza NEW (spawn en inicio)
     public KeyCode continueKey = KeyCode.C;     // fuerza CONTINUE (spawn en save si existe)
 
+    [Tooltip("Botón de mando para forzar CONTINUE (ej. SELECT / BACK).")]
+    public KeyCode continuePadKey = KeyCode.JoystickButton6;
+
     [Header("Death Respawn")]
     [Tooltip("Si está activo, no recarga escena al morir; teleporta y listo.")]
     public bool respawnWithoutReload = true;
@@ -34,6 +38,12 @@ public class PlayerRespawn : MonoBehaviour
     [Tooltip("En el Editor, al dar Play, borra el checkpoint guardado para que CONTINUE solo funcione si lo has tocado en ESTA sesión.")]
     public bool editorClearCheckpointOnPlay = true;
 
+    [Header("Spawn Freeze")]
+    [Tooltip("Si está activo, al entrar en la escena congelamos al player un momento para que veas el spawn.")]
+    public bool freezeOnSceneSpawn = true;
+
+    [Tooltip("Duración del congelado de spawn (en segundos). Valores típicos 0.05–0.2.")]
+    public float sceneSpawnFreezeTime = 0.12f;
 
     // ===== PlayerPrefs keys =====
     private const string PREF_RUNMODE = "RUN_MODE"; // 0 NEW, 1 CONTINUE
@@ -48,9 +58,11 @@ public class PlayerRespawn : MonoBehaviour
         return $"{baseKey}__{SceneManager.GetActiveScene().name}";
     }
 
-
     private Rigidbody2D rb;
     private Vector3 initialSpawnPos;
+
+    // control interno del freeze
+    private Coroutine spawnFreezeCoroutine;
 
     private void Awake()
     {
@@ -62,30 +74,32 @@ public class PlayerRespawn : MonoBehaviour
 
     private void Start()
     {
-    #if UNITY_EDITOR
-        // En Editor: Play normal = NEW siempre
-        SetRunMode(0);
+#if UNITY_EDITOR
+        int mode = GetRunMode(); // 0 NEW, 1 CONTINUE
 
-        // Y además: si quieres que C solo funcione si has tocado checkpoint en ESTA sesión,
-        // borra el checkpoint persistido al arrancar Play.
-        if (editorClearCheckpointOnPlay)
+        // Solo limpiar checkpoint al arrancar si estás en NEW
+        if (mode == 0 && editorClearCheckpointOnPlay)
+        {
             ClearSavedCheckpoint();
-    #endif
+            Debug.Log("[PlayerRespawn] Editor clear checkpoint on play (NEW).");
+        }
+#endif
 
         ApplySpawnForSceneEntry();
     }
 
-
-
     private void Update()
     {
-        // Teclas para decidir desde la propia TrainingArea (sin menú)
-        if (Input.GetKeyDown(newGameKey))
+        // Teclas / botones para decidir desde la propia TrainingArea (sin menú)
+        bool newGameInput    = Input.GetKeyDown(newGameKey);
+        bool continueInput   = Input.GetKeyDown(continueKey) || Input.GetKeyDown(continuePadKey);
+
+        if (newGameInput)
         {
             SetRunMode(0);
             ApplySpawnForSceneEntry();
         }
-        else if (Input.GetKeyDown(continueKey))
+        else if (continueInput)
         {
             SetRunMode(1);
             ApplySpawnForSceneEntry();
@@ -164,7 +178,6 @@ public class PlayerRespawn : MonoBehaviour
         else
         {
             // NEW: inicio SIEMPRE (aunque exista save), pero NO se borra el save.
-            // Eso permite: empezar en Unity y, si coges checkpoint en esta run, morir => checkpoint.
             if (newGameIgnoresSavedCheckpointOnStart)
             {
                 TeleportTo(initialSpawnPos);
@@ -172,12 +185,13 @@ public class PlayerRespawn : MonoBehaviour
             }
             else
             {
-                // Si quieres permitir que NEW también use save (normalmente no lo quieres)
                 Vector3 p = HasSavedCheckpoint() ? GetSavedCheckpointPosition() : initialSpawnPos;
                 TeleportTo(p);
                 Debug.Log($"[PlayerRespawn] Start spawn (NEW but allowed save) -> {p}");
             }
         }
+
+        StartSpawnFreezeIfNeeded();
     }
 
     // =========================
@@ -201,14 +215,12 @@ public class PlayerRespawn : MonoBehaviour
         return useCheckpoint && PlayerPrefs.GetInt(K(PREF_HAS), 0) == 1;
     }
 
-
     private Vector3 GetSavedCheckpointPosition()
     {
         float x = PlayerPrefs.GetFloat(K(PREF_X), initialSpawnPos.x);
         float y = PlayerPrefs.GetFloat(K(PREF_Y), initialSpawnPos.y);
         return new Vector3(x, y, transform.position.z);
     }
-
 
     private void SaveCheckpointPrefs(string id, Vector3 p)
     {
@@ -218,8 +230,6 @@ public class PlayerRespawn : MonoBehaviour
         PlayerPrefs.SetString(K(PREF_ID), id);
         PlayerPrefs.Save();
     }
-
-
 
     public void ClearSavedCheckpoint()
     {
@@ -233,7 +243,6 @@ public class PlayerRespawn : MonoBehaviour
 
         Debug.Log($"[PlayerRespawn] ClearSavedCheckpoint() (scene={SceneManager.GetActiveScene().name})");
     }
-
 
     private int GetRunMode()
     {
@@ -251,7 +260,6 @@ public class PlayerRespawn : MonoBehaviour
     {
         if (rb != null)
         {
-            // Unity 6: velocity obsoleto => linearVelocity
             rb.position = worldPos;
 
             if (resetVelocityOnTeleport)
@@ -272,4 +280,37 @@ public class PlayerRespawn : MonoBehaviour
         RespawnAfterDeath();
     }
 
+    // =========================
+    // Spawn freeze SIN tocar rb.simulated
+    // =========================
+    private void StartSpawnFreezeIfNeeded()
+    {
+        if (!freezeOnSceneSpawn || rb == null)
+            return;
+
+        if (spawnFreezeCoroutine != null)
+            StopCoroutine(spawnFreezeCoroutine);
+
+        spawnFreezeCoroutine = StartCoroutine(SceneSpawnFreezeCoroutine());
+    }
+
+    private IEnumerator SceneSpawnFreezeCoroutine()
+    {
+        RigidbodyType2D prevBodyType = rb.bodyType;
+        float prevGravity = rb.gravityScale;
+
+        rb.bodyType = RigidbodyType2D.Kinematic;
+        rb.gravityScale = 0f;
+        rb.linearVelocity = Vector2.zero;
+        rb.angularVelocity = 0f;
+
+        yield return new WaitForSeconds(sceneSpawnFreezeTime);
+
+        rb.bodyType = prevBodyType;
+        rb.gravityScale = prevGravity;
+        rb.linearVelocity = Vector2.zero;
+        rb.angularVelocity = 0f;
+
+        spawnFreezeCoroutine = null;
+    }
 }

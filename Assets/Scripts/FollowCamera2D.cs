@@ -27,8 +27,15 @@ public class FollowCamera2D : MonoBehaviour
     [Header("Z Offset")]
     public float offsetZ = -10f;
 
+    [Header("Teleport / Respawn Snap")]
+    [Tooltip("Si se hace un teleport (checkpoint, puerta, etc.), se puede solicitar un snap duro al target.")]
+    public bool allowSnapRequests = true;
+
     private float velX;
     private float velY;
+
+    // Flag interno para pedir un snap en el siguiente LateUpdate
+    private bool snapRequested;
 
     private void Reset()
     {
@@ -46,17 +53,43 @@ public class FollowCamera2D : MonoBehaviour
         cam.orthographic = true;
     }
 
+    /// <summary>
+    /// Llamar cuando hagas un respawn/teleport duro del player.
+    /// La cámara se colocará EXACTAMENTE encima del target en el siguiente LateUpdate,
+    /// reseteando las velocidades internas para que no arrastre smooth viejo.
+    /// </summary>
+    public void RequestImmediateSnap()
+    {
+        if (!allowSnapRequests) return;
+        snapRequested = true;
+    }
+
     private void LateUpdate()
     {
         if (!target) return;
+
+        // SNAP DURO (respawn / checkpoint)
+        if (snapRequested)
+        {
+            snapRequested = false;
+
+            float px = target.position.x;
+            float py = target.position.y;
+
+            velX = 0f;
+            velY = 0f;
+
+            transform.position = new Vector3(px, py, offsetZ);
+            return;
+        }
 
         // Posición actual de la cámara
         float camX = transform.position.x;
         float camY = transform.position.y;
 
         // Posición del jugador
-        float px = target.position.x;
-        float py = target.position.y;
+        float px2 = target.position.x;
+        float py2 = target.position.y;
 
         float newCamX = camX;
         float newCamY = camY;
@@ -67,10 +100,10 @@ public class FollowCamera2D : MonoBehaviour
         float leftLimit = camX - deadZoneLeft;
         float rightLimit = camX + deadZoneRight;
 
-        if (px < leftLimit)
-            newCamX = px + deadZoneLeft;
-        else if (px > rightLimit)
-            newCamX = px - deadZoneRight;
+        if (px2 < leftLimit)
+            newCamX = px2 + deadZoneLeft;
+        else if (px2 > rightLimit)
+            newCamX = px2 - deadZoneRight;
 
         // ---------------------------
         // DEAD ZONE VERTICAL
@@ -80,14 +113,14 @@ public class FollowCamera2D : MonoBehaviour
 
         bool outsideVerticalDeadZone = false;
 
-        if (py < downLimit)
+        if (py2 < downLimit)
         {
-            newCamY = py + deadZoneDown;
+            newCamY = py2 + deadZoneDown;
             outsideVerticalDeadZone = true;
         }
-        else if (py > upLimit)
+        else if (py2 > upLimit)
         {
-            newCamY = py - deadZoneUp;
+            newCamY = py2 - deadZoneUp;
             outsideVerticalDeadZone = true;
         }
 
