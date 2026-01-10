@@ -15,6 +15,17 @@ public class PlayerSparkBoost : MonoBehaviour
     [Range(0f, 0.5f)] public float aimDeadzone = 0.25f;
     public bool keepLastAimWhenNoInput = true;
 
+    [Header("Auto-aim Pickups (cuando NO hay input)")]
+    [Tooltip("Si no hay input de dirección, el Spark apunta al pickup usable más cercano.")]
+    public bool autoAimNearestPickup = true;
+
+    [Tooltip("Radio para buscar pickups alrededor del player cuando no hay input.")]
+    [Range(0.2f, 8f)] public float autoAimPickupRadius = 2.5f;
+
+    [Tooltip("LayerMask de los FlameSparkPickup (puedes copiar el mismo de PlayerBounceAttack).")]
+    public LayerMask pickupLayers;
+
+
     [Header("Spark - Ventana")]
     public float defaultWindowDuration = 1.2f;
     [Range(0f, 1f)] public float goodStart = 0.60f;
@@ -258,6 +269,8 @@ public class PlayerSparkBoost : MonoBehaviour
     private RigidbodyType2D baseBodyType;
 
     private readonly RaycastHit2D[] castHits = new RaycastHit2D[64];
+    private readonly Collider2D[] pickupHitsForAim = new Collider2D[16];
+
 
     public bool IsSparkActive() => sparkActive;
     public bool IsDashing() => dashActive;
@@ -1336,6 +1349,81 @@ remaining -= nudged;
         }
     }
 
+
+    /// <summary>
+    /// Devuelve una dirección normalizada desde el player hacia el FlameSparkPickup usable
+    /// más cercano dentro del alcance REAL del dash (escalado por autoAimPickupRadius).
+    /// Si no hay ninguno, devuelve false.
+    /// </summary>
+    private bool TryGetNearestPickupAimDir(out Vector2 dir)
+    {
+        dir = Vector2.zero;
+
+        // Si no está activado en el inspector, ni lo intentamos
+        if (!autoAimNearestPickup)
+            return false;
+
+        // Sin máscara de pickups configurada, no hay nada que buscar
+        if (pickupLayers.value == 0)
+            return false;
+
+        Vector2 origin = rb.position;
+
+        // Alcance nominal del dash (lo mismo que usa la preview)
+        float scale = Mathf.Clamp(dashDistanceScale, 0.5f, 1f);
+        float dashReach = dashSpeed * Mathf.Max(0.01f, dashDuration) * scale;
+
+        // Misma “seguridad” que la preview
+        float safeMul = Mathf.Clamp(previewSafetyMultiplier, 0.10f, 1.00f);
+        dashReach *= safeMul;
+
+        // AHORA: autoAimPickupRadius es un MULTIPLICADOR del alcance real
+        // 1.0 => toda la distancia del dash
+        // 2.0 => el doble, etc.
+        float radius = Mathf.Max(0.1f, dashReach * autoAimPickupRadius);
+
+        int count = Physics2D.OverlapCircleNonAlloc(
+            origin,
+            radius,
+            pickupHitsForAim,
+            pickupLayers
+        );
+
+        FlameSparkPickup bestPickup = null;
+        float bestSqr = float.MaxValue;
+
+        for (int i = 0; i < count; i++)
+        {
+            var c = pickupHitsForAim[i];
+            if (!c) continue;
+
+            var pickup = c.GetComponent<FlameSparkPickup>();
+            if (pickup == null) continue;
+            if (!pickup.IsUsableNow()) continue;
+
+            Vector2 anchor = pickup.GetAnchorWorld();
+            float d2 = (anchor - origin).sqrMagnitude;
+            if (d2 < bestSqr)
+            {
+                bestSqr = d2;
+                bestPickup = pickup;
+            }
+        }
+
+        if (bestPickup == null)
+            return false;
+
+        Vector2 target = bestPickup.GetAnchorWorld();
+        Vector2 v = target - origin;
+        if (v.sqrMagnitude < 0.0001f)
+            return false;
+
+        dir = v.normalized;
+        return true;
+    }
+
+
+
     // =========================
     // Aim
     // =========================
@@ -1351,9 +1439,21 @@ remaining -= nudged;
         if (Mathf.Abs(y) < aimDeadzone) y = 0f;
 
         Vector2 v = new Vector2(x, y);
-        if (v.sqrMagnitude < 0.0001f)
-            return keepLastAimWhenNoInput ? lastAim : Vector2.up;
 
+        // SIN INPUT: intentamos auto-aim al pickup más cercano
+        if (v.sqrMagnitude < 0.0001f)
+        {
+            if (TryGetNearestPickupAimDir(out Vector2 pickupDir))
+            {
+                lastAim = pickupDir;   // para que el "keepLast" sea coherente
+                return pickupDir;
+            }
+
+            // Fallback clásico si no hay pickup cerca
+            return keepLastAimWhenNoInput ? lastAim : Vector2.up;
+        }
+
+        // Con input: seguimos usando las 8 direcciones
         if (x != 0f && y != 0f)
             v = new Vector2(Mathf.Sign(x), Mathf.Sign(y)).normalized;
         else
@@ -1362,6 +1462,7 @@ remaining -= nudged;
         lastAim = v;
         return v;
     }
+
 
     // =========================
     // Timing helpers

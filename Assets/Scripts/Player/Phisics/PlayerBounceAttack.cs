@@ -544,7 +544,11 @@ public class PlayerBounceAttack : MonoBehaviour
         // 3) Si no pierce: rebote
         didBounce = true;
 
+        // Normal tal cual viene del hit; la limpieza de dientes y diagonales
+        // la hace ComputeBouncedDir -> QuantizeSurfaceNormal.
         outDir = ComputeBouncedDir(outDir, hit.normal);
+
+
 
 
         // Si estamos pegados (hit.distance ~ 0), NO lo trates como "bloqueado":
@@ -579,8 +583,11 @@ public class PlayerBounceAttack : MonoBehaviour
         out RaycastHit2D bestHit)
     {
         bestHit = default;
-        RaycastHit2D[] hits = Physics2D.CircleCastAll(origin, radius, dir, distance, mask);
 
+        // Dir normalizada para todos los tests
+        Vector2 dirNorm = (dir.sqrMagnitude > 0.0001f) ? dir.normalized : Vector2.right;
+
+        RaycastHit2D[] hits = Physics2D.CircleCastAll(origin, radius, dirNorm, distance, mask);
         float bestDist = float.PositiveInfinity;
         bool found = false;
 
@@ -592,11 +599,23 @@ public class PlayerBounceAttack : MonoBehaviour
             if (!h.collider) continue;
             if (h.collider.isTrigger) continue;
             if (playerCol != null && h.collider == playerCol) continue;
-
             if (ignoreSet != null && ignoreSet.Contains(h.collider)) continue;
 
             float d = h.distance;
 
+            // SOLO filtro especial para contactos “pegados” al origen:
+            // si estamos prácticamente dentro de un collider
+            // y la normal mira CASI en la misma dirección que nos movemos,
+            // lo ignoramos (es la pared de detrás / esquina rara).
+            if (d <= skin * 1.5f)
+            {
+                float dot = Vector2.Dot(dirNorm, h.normal);
+                // dot > 0.25 => normal bastante alineada con dir (backface)
+                if (dot > 0.25f)
+                    continue;
+            }
+
+            // A partir de aquí: selección normal por distancia mínima
             if (!found)
             {
                 bestDist = d;
@@ -614,6 +633,8 @@ public class PlayerBounceAttack : MonoBehaviour
 
         return found;
     }
+
+
 
     // ======================================================================
     // RUNTIME PIERCE + POST-PUSH
@@ -1525,16 +1546,24 @@ public class PlayerBounceAttack : MonoBehaviour
 
 
 
-    private bool TryGetNearestPickupAnchor(Vector2 center, float radius, out Vector2 anchor)
+    #pragma warning disable
+    public bool TryGetNearestPickupAnchor(Vector2 center, float radius, out Vector2 anchor)
     {
         anchor = default;
         if (pickupLayers.value == 0) return false;
 
+        // Si te llaman con radius <= 0, usa el radio por defecto del aim assist
+        float searchRadius = (radius > 0f) ? radius : aimAssistPickupRadius;
+        if (searchRadius <= 0f) return false;
+
+        // Rellenamos el array reutilizable con los pickups que caen dentro del radio
+        int count = Physics2D.OverlapCircleNonAlloc(center, searchRadius, _pickupHits, pickupLayers);
+        if (count <= 0) return false;
+
         float bestSqr = float.PositiveInfinity;
         FlameSparkPickup best = null;
 
-        int n = Physics2D.OverlapCircleNonAlloc(center, radius, _pickupHits, pickupLayers);
-        for (int i = 0; i < n; i++)
+        for (int i = 0; i < count; i++)
         {
             var col = _pickupHits[i];
             if (!col || !col.enabled) continue;
@@ -1555,6 +1584,8 @@ public class PlayerBounceAttack : MonoBehaviour
 
         return best != null;
     }
+    #pragma warning restore
+
 
 
     private void ApplyMagnetCurve(List<Vector3> points, Vector2 anchor)
@@ -1749,43 +1780,85 @@ public class PlayerBounceAttack : MonoBehaviour
 
     private Vector2 ComputeBouncedDir(Vector2 incomingDir, Vector2 normal)
     {
-        incomingDir = (incomingDir.sqrMagnitude > 0.0001f) ? incomingDir.normalized : Vector2.right;
-        normal = (normal.sqrMagnitude > 0.0001f) ? normal.normalized : Vector2.up;
+        // 1) Normaliza dirección de entrada
+        if (incomingDir.sqrMagnitude < 1e-4f)
+            incomingDir = Vector2.right;
+        else
+            incomingDir = incomingDir.normalized;
 
-        // Mantén coherencia con tu sistema: decide si el input era cardinal o diagonal
-        Vector2 qIn = Quantize8Dirs(incomingDir);
+        // 2) Normal “limpia” de la superficie (filtra dientes de minitiles
+        //    pero deja diagonales reales cuando tocan)
+        Vector2 cleanNormal = QuantizeSurfaceNormal(normal);
 
-        bool inputIsCardinal =
-            (Mathf.Abs(qIn.x) < 0.0001f && Mathf.Abs(qIn.y) > 0.0001f) ||   // up/down
-            (Mathf.Abs(qIn.y) < 0.0001f && Mathf.Abs(qIn.x) > 0.0001f);     // left/right
+        // 3) Rebote físico sobre esa normal
+        Vector2 reflected = Vector2.Reflect(incomingDir, cleanNormal);
 
-        // Suelo/techo: solo fuerza vertical PERFECTO si el input era cardinal (UP o DOWN)
-        if (Mathf.Abs(normal.y) >= normalSnapThreshold && Mathf.Abs(normal.y) >= Mathf.Abs(normal.x))
+        // 4) Ajuste final a tus 8 direcciones jugables
+        return Quantize8Dirs(reflected);
+    }
+
+    /// <summary>
+    /// Cuantiza la normal física a 4 ó 8 direcciones “macro”:
+    /// - Si el ángulo está muy cerca de 45° => diagonal pura (±1, ±1).
+    /// - En caso contrario => pared (±1,0) o suelo/techo (0,±1).
+    /// Así filtramos dientes de minitiles pero conservamos diagonales reales.
+    /// </summary>
+    private Vector2 QuantizeSurfaceNormal(Vector2 n)
+    {
+        if (n.sqrMagnitude < 1e-6f)
+            return Vector2.up;
+
+        n = n.normalized;
+
+        float ax = Mathf.Abs(n.x);
+        float ay = Mathf.Abs(n.y);
+
+        // Tolerancia para considerar que es “de verdad” diagonal (casi 45°).
+        // Si ax y ay son parecidos -> diagonal. Si uno domina claramente -> cardinal.
+        const float DIAG_TOL = 0.15f; // puedes exponerlo en el inspector si quieres afinar
+
+        if (Mathf.Abs(ax - ay) <= DIAG_TOL)
         {
-            if (inputIsCardinal)
-            {
-                if (qIn.y < 0f) return Vector2.up;    // down -> up
-                if (qIn.y > 0f) return Vector2.down;  // up -> down
-            }
-
-            // Si era diagonal, conserva la lógica reflect (y luego cuantiza a 8 dirs)
-            return Quantize8Dirs(Vector2.Reflect(qIn, normal));
+            // Diagonal real: nos quedamos con el signo de cada componente
+            float sx = Mathf.Sign(n.x);
+            float sy = Mathf.Sign(n.y);
+            return new Vector2(sx, sy).normalized;
         }
 
-        // Pared: solo fuerza horizontal PERFECTO si el input era cardinal (LEFT o RIGHT)
-        if (Mathf.Abs(normal.x) >= normalSnapThreshold && Mathf.Abs(normal.x) >= Mathf.Abs(normal.y))
+        // No es diagonal “pura”: lo tratamos como pared o suelo/techo
+        if (ax > ay)
         {
-            if (inputIsCardinal)
-            {
-                if (qIn.x < 0f) return Vector2.right; // left -> right
-                if (qIn.x > 0f) return Vector2.left;  // right -> left
-            }
-
-            return Quantize8Dirs(Vector2.Reflect(qIn, normal));
+            // pared izquierda/derecha
+            return new Vector2(Mathf.Sign(n.x), 0f);
         }
+        else
+        {
+            // suelo/techo
+            return new Vector2(0f, Mathf.Sign(n.y));
+        }
+    }
 
-        // Caso general
-        return Quantize8Dirs(Vector2.Reflect(qIn, normal));
+
+    /// <summary>
+    /// Convierte la normal “fea” del Composite (0.73,0.68, etc.)
+    /// en una normal de grid: (±1,0) o (0,±1).
+    /// </summary>
+    private Vector2 CleanGridNormal(Vector2 raw)
+    {
+        if (raw.sqrMagnitude < 1e-5f)
+            return Vector2.up;
+
+        raw.Normalize();
+
+        float ax = Mathf.Abs(raw.x);
+        float ay = Mathf.Abs(raw.y);
+
+        // Si la normal está más cerca de vertical, la colapsamos a (0,±1).
+        // Si está más cerca de horizontal, la colapsamos a (±1,0).
+        if (ax > ay)
+            return new Vector2(Mathf.Sign(raw.x), 0f);
+        else
+            return new Vector2(0f, Mathf.Sign(raw.y));
     }
 
 
@@ -1873,3 +1946,12 @@ public class PlayerBounceAttack : MonoBehaviour
 
 
 }
+
+
+
+// TEST 123
+// TEST 123
+// TEST 123
+// TEST 123
+// TEST 123
+
